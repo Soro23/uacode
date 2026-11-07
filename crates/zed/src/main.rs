@@ -315,7 +315,7 @@ fn main() {
             client::telemetry::os_name(),
             client::telemetry::os_version(),
         );
-        println!("Zed System Specs (from CLI):\n{}", system_specs);
+        println!("UACode System Specs (from CLI):\n{}", system_specs);
         return;
     }
 

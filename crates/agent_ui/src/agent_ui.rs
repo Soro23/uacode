@@ -403,7 +403,7 @@ actions!(
         ScrollOutputToNextMessage,
         /// Toggles in-thread search over the current agent thread's contents.
         ToggleSearch,
-        /// Import agent threads from other Zed release channels (e.g. Preview, Nightly).
+        /// Import agent threads from other UACode release channels (e.g. Preview, Nightly).
         ImportThreadsFromOtherChannels,
         /// Starts a new terminal thread.
         NewTerminalThread,
@@ -560,7 +560,7 @@ impl Agent {
 
     pub fn label(&self) -> SharedString {
         match self {
-            Self::NativeAgent => "Zed Agent".into(),
+            Self::NativeAgent => "UACode Agent".into(),
             Self::Custom { id, .. } => id.0.clone(),
             #[cfg(any(test, feature = "test-support"))]
             Self::Stub => "Stub Agent".into(),

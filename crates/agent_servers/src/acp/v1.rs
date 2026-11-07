@@ -5536,7 +5536,7 @@ mod tests {
                         url_elicitation_id.clone(),
                         "https://auth.example.com/device",
                     ),
-                    "Authorize Zed in your browser",
+                    "Authorize UACode in your browser",
                 ),
                 acp::CompleteElicitationNotification::new(url_elicitation_id),
                 cx,

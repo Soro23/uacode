@@ -240,9 +240,8 @@ fn register_language_model_providers(
                 cx,
             )),
             cx,
-        )),
-        cx,
-    );
+        );
+    }
     registry.register_provider(
         Arc::new(AnthropicLanguageModelProvider::new(
             client.http_client(),

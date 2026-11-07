@@ -216,7 +216,7 @@ fn announcement_for_version(version: &Version, cx: &App) -> Option<AnnouncementC
             "Built on DeltaDB, so your threads and code stay in sync across machines and teammates."
                 .into(),
         bullet_items: vec![
-            "Made by the Zed team, with the same quality and performance".into(),
+            "Made by the UACode team, with the same quality and performance".into(),
             "Work with teammates and agents in the same thread, live or later".into(),
             "Pick up your thread on the web or your phone, without committing or pushing".into(),
         ],
