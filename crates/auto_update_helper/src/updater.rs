@@ -458,7 +458,7 @@ mod test {
     fn test_zed_launch_command_preserves_arguments() {
         let arguments = vec![
             OsString::from("--user-data-dir"),
-            OsString::from(r"C:\Zed Data"),
+            OsString::from(r"C:\UACode Data"),
         ];
         let command = zed_launch_command(Path::new(r"C:\Program Files\Zed"), &arguments);
 

@@ -31,7 +31,7 @@ use walkdir::WalkDir;
 
 use std::io::IsTerminal;
 
-const URL_PREFIX: [&'static str; 5] = ["zed://", "http://", "https://", "file://", "ssh://"];
+const URL_PREFIX: [&'static str; 5] = ["uacode://", "http://", "https://", "file://", "ssh://"];
 
 struct Detect;
 
@@ -536,7 +536,7 @@ fn run() -> Result<()> {
 
     let (server, server_name) =
         IpcOneShotServer::<IpcHandshake>::new().context("Handshake before Zed spawn")?;
-    let url = format!("zed-cli://{server_name}");
+    let url = format!("uacode-cli://{server_name}");
 
     let open_behavior = if args.new {
         cli::OpenBehavior::AlwaysNew

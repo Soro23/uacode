@@ -418,7 +418,7 @@ pub fn build_window_options(display_uuid: Option<Uuid>, cx: &mut App) -> WindowO
             height: px(240.0),
         }),
         tabbing_identifier: if use_system_window_tabs {
-            Some(String::from("zed"))
+            Some(String::from("uacode"))
         } else {
             None
         },
@@ -1280,7 +1280,7 @@ fn register_actions(
                         Toast::new(
                             NotificationId::unique::<RegisterZedScheme>(),
                             format!(
-                                "zed:// links will now open in {}.",
+                                "uacode:// links will now open in {}.",
                                 ReleaseChannel::global(cx).display_name()
                             ),
                         ),
@@ -1290,7 +1290,7 @@ fn register_actions(
                 Ok(())
             })
             .detach_and_prompt_err(
-                "Error registering zed:// scheme",
+                "Error registering uacode:// scheme",
                 window,
                 cx,
                 |_, _, _| None,

@@ -1256,10 +1256,10 @@ Root: HKCU; Subkey: "Software\Classes\Drive\shell\{#RegValueName}\command"; Valu
 Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; ValueData: "{code:AddToPath|{app}\bin}"; Tasks: addtopath; Check: NeedsAddToPath(ExpandConstant('{app}\bin'))
 
 ; URI Scheme
-Root: HKCU; Subkey: "Software\Classes\zed"; ValueType: "string"; ValueData: "URL:zed Protocol"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\zed"; ValueType: "string"; ValueName: "URL Protocol"; ValueData: ""
-Root: HKCU; Subkey: "Software\Classes\zed\DefaultIcon"; ValueType: "string"; ValueData: "{app}\Zed.exe,1"
-Root: HKCU; Subkey: "Software\Classes\zed\shell\open\command"; ValueType: "string"; ValueData: """{app}\Zed.exe"" ""%1"""
+Root: HKCU; Subkey: "Software\Classes\uacode"; ValueType: "string"; ValueData: "URL:uacode Protocol"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\uacode"; ValueType: "string"; ValueName: "URL Protocol"; ValueData: ""
+Root: HKCU; Subkey: "Software\Classes\uacode\DefaultIcon"; ValueType: "string"; ValueData: "{app}\UACode.exe,1"
+Root: HKCU; Subkey: "Software\Classes\uacode\shell\open\command"; ValueType: "string"; ValueData: """{app}\UACode.exe"" ""%1"""
 
 [Code]
 function WizardNotSilent(): Boolean;

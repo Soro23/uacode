@@ -21358,7 +21358,7 @@ mod tests {
             "file:///tmp/authorize",
             "data:text/plain,authorize",
             "mailto:user@example.com",
-            "zed://settings",
+            "uacode://settings",
         ] {
             let result = thread.update(cx, |thread, cx| {
                 thread.request_elicitation(

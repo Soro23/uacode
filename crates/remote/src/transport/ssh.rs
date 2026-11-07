@@ -810,7 +810,7 @@ impl SshRemoteConnection {
         use askpass::AskPassResult;
 
         let temp_dir = tempfile::Builder::new()
-            .prefix("zed-ssh-session")
+            .prefix("uacode-ssh-session")
             .tempdir()?;
 
         // On non-Windows, check if the user already has an active ControlMaster

@@ -412,7 +412,7 @@ fn main() {
                         background_executor1.spawn(task).detach();
                     }
                 },
-                |pid| paths::temp_dir().join(format!("zed-crash-handler-{pid}")),
+                |pid| paths::temp_dir().join(format!("uacode-crash-handler-{pid}")),
                 move |duration| background_executor.timer(duration),
             )),
         )
@@ -1064,7 +1064,7 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
                                 });
                             } else {
                                 log::warn!(
-                                    "zed://agent received but the AgentPanel is not registered \
+                                    "uacode://agent received but the AgentPanel is not registered \
                                      (is `disable_ai` enabled?)"
                                 );
                             }
@@ -1101,7 +1101,7 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
                                     .project()
                                     .update(cx, |project, _| project.lsp_store())
                             })?;
-                            let uri = format!("zed://schemas/{}", schema_path);
+                            let uri = format!("uacode://schemas/{}", schema_path);
                             let json_schema_content =
                                 json_schema_store::handle_schema_request(lsp_store, uri, cx)
                                     .await?;
@@ -1150,8 +1150,8 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
                 });
             }
             OpenRequestKind::Setting { setting_path } => {
-                // zed://settings/languages/$(language)/tab_size  - DONT SUPPORT
-                // zed://settings/languages/Rust/tab_size  - SUPPORT
+                // uacode://settings/languages/$(language)/tab_size  - DONT SUPPORT
+                // uacode://settings/languages/Rust/tab_size  - SUPPORT
                 // languages.$(language).tab_size
                 // [ languages $(language) tab_size]
                 cx.spawn(async move |cx| {
@@ -1700,7 +1700,7 @@ struct Args {
     /// Use `path:line:row` syntax to open a file at a specific location.
     /// Non-existing paths and directories will ignore `:line:row` suffix.
     ///
-    /// URLs can either be `file://` or `zed://` scheme, or relative to <https://zed.dev>.
+    /// URLs can either be `file://` or `uacode://` scheme, or relative to <https://zed.dev>.
     paths_or_urls: Vec<String>,
 
     /// Pairs of file paths to diff. Can be specified multiple times.
@@ -1815,8 +1815,8 @@ fn parse_url_arg(arg: &str, cx: &App) -> String {
         Ok(path) => format!("file://{}", path.display()),
         Err(_) => {
             if arg.starts_with("file://")
-                || arg.starts_with("zed://")
-                || arg.starts_with("zed-cli://")
+                || arg.starts_with("uacode://")
+                || arg.starts_with("uacode-cli://")
                 || arg.starts_with("ssh://")
                 || parse_zed_link(arg, cx).is_some()
             {

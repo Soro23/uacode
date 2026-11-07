@@ -273,7 +273,7 @@ impl PasswordProxy {
         >,
         executor: BackgroundExecutor,
     ) -> Result<Self> {
-        let temp_dir = tempfile::Builder::new().prefix("zed-askpass").tempdir()?;
+        let temp_dir = tempfile::Builder::new().prefix("uacode-askpass").tempdir()?;
         let askpass_socket = temp_dir.path().join("askpass.sock");
         let current_exec =
             std::env::current_exe().context("Failed to determine current zed executable path.")?;

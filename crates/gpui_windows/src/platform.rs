@@ -1988,9 +1988,9 @@ mod tests {
         assert_eq!(
             encode_restart_arguments(&[
                 OsString::from("--user-data-dir"),
-                OsString::from(r"C:\Zed Data"),
+                OsString::from(r"C:\UACode Data"),
             ]),
-            OsStr::new(r#""--user-data-dir" "C:\Zed Data""#)
+            OsStr::new(r#""--user-data-dir" "C:\UACode Data""#)
         );
         assert_eq!(
             encode_restart_arguments(&[OsString::from(r"C:\")]),

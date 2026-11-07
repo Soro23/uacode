@@ -1926,13 +1926,17 @@ impl ProtoClient for Client {
     }
 }
 
-/// prefix for the zed:// url scheme
-pub const ZED_URL_SCHEME: &str = "zed";
+/// prefix for the uacode:// url scheme
+pub const ZED_URL_SCHEME: &str = "uacode";
+
+/// Whether the Zed cloud services (hosted models, Zed accounts, plans and Zed
+/// edit predictions) are offered. UACode has no such backend, so they stay hidden.
+pub const ZED_CLOUD_ENABLED: bool = false;
 
 /// A parsed Zed link that can be handled internally by the application.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ZedLink {
-    /// Join a channel: `zed.dev/channel/channel-name-123` or `zed://channel/channel-name-123`
+    /// Join a channel: `zed.dev/channel/channel-name-123` or `uacode://channel/channel-name-123`
     Channel { channel_id: u64 },
     /// Open channel notes: `zed.dev/channel/channel-name-123/notes` or with heading `notes#heading`
     ChannelNotes {

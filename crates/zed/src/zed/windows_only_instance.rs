@@ -111,7 +111,7 @@ fn split_paths_and_urls(paths_or_urls: &[String]) -> (Vec<String>, Vec<String>) 
     let mut paths = vec![];
     let mut urls = vec![];
     for path in paths_or_urls {
-        if path.starts_with("zed://")
+        if path.starts_with("uacode://")
             || path.starts_with("http://")
             || path.starts_with("https://")
             || path.starts_with("file://")
@@ -137,7 +137,7 @@ fn send_args_to_instance(args: &Args) -> anyhow::Result<()> {
 
     let (server, server_name) =
         IpcOneShotServer::<IpcHandshake>::new().context("Handshake before Zed spawn")?;
-    let url = format!("zed-cli://{server_name}");
+    let url = format!("uacode-cli://{server_name}");
 
     let request = {
         let (paths, urls) = split_paths_and_urls(&args.paths_or_urls);
@@ -233,7 +233,7 @@ mod tests {
     fn test_split_paths_and_urls() {
         let file = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
         let canonical = std::fs::canonicalize(file).unwrap();
-        let url = "zed://file/C:/project/main.rs:3";
+        let url = "uacode://file/C:/project/main.rs:3";
 
         let (paths, urls) = split_paths_and_urls(&[format!("{file}:2:5"), url.to_string()]);
 
