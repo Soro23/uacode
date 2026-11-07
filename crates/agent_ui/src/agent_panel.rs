@@ -6269,7 +6269,7 @@ impl AgentPanel {
     }
 
     fn should_render_trial_end_upsell(&self, cx: &mut Context<Self>) -> bool {
-        if TrialEndUpsell::dismissed(cx) {
+        if !client::ZED_CLOUD_ENABLED || TrialEndUpsell::dismissed(cx) {
             return false;
         }
 
@@ -6302,9 +6302,10 @@ impl AgentPanel {
     }
 
     fn should_render_new_user_onboarding(&mut self, cx: &mut Context<Self>) -> bool {
-        if self
-            .new_user_onboarding_upsell_dismissed
-            .load(Ordering::Acquire)
+        if !client::ZED_CLOUD_ENABLED
+            || self
+                .new_user_onboarding_upsell_dismissed
+                .load(Ordering::Acquire)
         {
             return false;
         }

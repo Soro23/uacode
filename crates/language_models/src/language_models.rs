@@ -232,10 +232,13 @@ fn register_language_model_providers(
     credentials_provider: Arc<dyn CredentialsProvider>,
     cx: &mut Context<LanguageModelRegistry>,
 ) {
-    registry.register_provider(
-        Arc::new(CloudLanguageModelProvider::new(
-            user_store,
-            client.clone(),
+    if client::ZED_CLOUD_ENABLED {
+        registry.register_provider(
+            Arc::new(CloudLanguageModelProvider::new(
+                user_store,
+                client.clone(),
+                cx,
+            )),
             cx,
         )),
         cx,

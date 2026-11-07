@@ -31,7 +31,8 @@ pub(crate) fn render_edit_prediction_setup_page(
 ) -> AnyElement {
     let providers = [
         Some(render_provider_dropdown(window, cx)),
-        Some(render_zed_provider(settings_window, window, cx).into_any_element()),
+        client::ZED_CLOUD_ENABLED
+            .then(|| render_zed_provider(settings_window, window, cx).into_any_element()),
         render_github_copilot_provider(settings_window, window, cx)
             .map(IntoElement::into_any_element),
         Some(
