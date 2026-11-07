@@ -44,10 +44,10 @@ pub static RELEASE_CHANNEL: LazyLock<ReleaseChannel> =
 #[cfg(target_os = "windows")]
 pub fn app_identifier() -> &'static str {
     match *RELEASE_CHANNEL {
-        ReleaseChannel::Dev => "Zed-Editor-Dev",
-        ReleaseChannel::Nightly => "Zed-Editor-Nightly",
-        ReleaseChannel::Preview => "Zed-Editor-Preview",
-        ReleaseChannel::Stable => "Zed-Editor-Stable",
+        ReleaseChannel::Dev => "UACode-Editor-Dev",
+        ReleaseChannel::Nightly => "UACode-Editor-Nightly",
+        ReleaseChannel::Preview => "UACode-Editor-Preview",
+        ReleaseChannel::Stable => "UACode-Editor-Stable",
     }
 }
 
@@ -197,18 +197,20 @@ impl ReleaseChannel {
             .map(|channel| channel.0)
     }
 
-    /// Returns whether we want to poll for updates for this [`ReleaseChannel`]
+    /// Returns whether we want to poll for updates for this [`ReleaseChannel`].
+    ///
+    /// UACode has no update server yet, so updates are disabled on every channel.
     pub fn poll_for_updates(&self) -> bool {
-        !matches!(self, ReleaseChannel::Dev)
+        false
     }
 
     /// Returns the display name for this [`ReleaseChannel`].
     pub fn display_name(&self) -> &'static str {
         match self {
-            ReleaseChannel::Dev => "Zed Dev",
-            ReleaseChannel::Nightly => "Zed Nightly",
-            ReleaseChannel::Preview => "Zed Preview",
-            ReleaseChannel::Stable => "Zed",
+            ReleaseChannel::Dev => "UACode Dev",
+            ReleaseChannel::Nightly => "UACode Nightly",
+            ReleaseChannel::Preview => "UACode Preview",
+            ReleaseChannel::Stable => "UACode",
         }
     }
 
@@ -227,10 +229,10 @@ impl ReleaseChannel {
     /// This also has to match the bundle identifier for Zed on macOS.
     pub fn app_id(&self) -> &'static str {
         match self {
-            ReleaseChannel::Dev => "dev.zed.Zed-Dev",
-            ReleaseChannel::Nightly => "dev.zed.Zed-Nightly",
-            ReleaseChannel::Preview => "dev.zed.Zed-Preview",
-            ReleaseChannel::Stable => "dev.zed.Zed",
+            ReleaseChannel::Dev => "dev.uacode.UACode-Dev",
+            ReleaseChannel::Nightly => "dev.uacode.UACode-Nightly",
+            ReleaseChannel::Preview => "dev.uacode.UACode-Preview",
+            ReleaseChannel::Stable => "dev.uacode.UACode",
         }
     }
 
