@@ -483,6 +483,8 @@ pub fn devcontainer_dir() -> &'static PathBuf {
     DEVCONTAINER_DIR.get_or_init(|| data_dir().join("devcontainer"))
 }
 
+// TODO(uacode): read `.uacode/` as the project folder, falling back to `.zed/`. Do it together
+// with the remote server rebranding (`.zed_server`, `zed-remote-server*`), which is deferred.
 /// Returns the relative path to a `.zed` folder within a project.
 pub fn local_settings_folder_name() -> &'static str {
     ".zed"
