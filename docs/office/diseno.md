@@ -1,6 +1,6 @@
 # Office: diseño
 
-Estado: **propuesta, pendiente de visto bueno**. No hay código escrito.
+Estado: **aprobado con cambios** (orden de fases 0-1-2-3-4 con worktrees antes que el orquestador, merge por UACode con el CLI de git, transporte MCP a decidir en la Fase 0, y en la Fase 1 límite de concurrencia, consumo y permisos por rol). Resultados de la Fase 0 en [spike.md](spike.md).
 
 Office es un panel de UACode con una oficina de agentes especializados (orquestador, PM/analista, diseñador, arquitecto, scrum master, tech lead/revisor, frontend, backend, QA, devops, seguridad, documentador). Cada puesto usa una IA (Claude Code o Codex vía ACP) con una cuenta concreta.
 
@@ -34,8 +34,9 @@ Versiones revisadas: `agent-client-protocol` 5.0.0 (schema 1.15.1), `claude-agen
 | `accounts_modal.rs` | Gestor de cuentas (modal) |
 | `office_store.rs` | Carga/guarda `office.json` y `accounts.json`, sincroniza `agent_servers` |
 | `roles.rs` | Plantillas de rol (Fase 2) |
-| `office_mcp.rs` | Servidor MCP del orquestador (Fase 3) |
-| `worktrees.rs` | Worktree por puesto e integración (Fase 4) |
+| `policy.rs` | Permisos por rol y límite de concurrencia (Fase 1) |
+| `worktrees.rs` | Worktree por puesto, revisión y merge con el CLI de git (Fase 3) |
+| `office_mcp.rs` | Servidor MCP del orquestador (Fase 4) |
 
 ### 1.2 Piezas existentes que se reutilizan
 
@@ -49,9 +50,9 @@ Versiones revisadas: `agent-client-protocol` 5.0.0 (schema 1.15.1), `claude-agen
 | `AcpThread` | `crates/acp_thread/src/acp_thread.rs` | Estado, eventos, permisos, plan, mensajes (ver 2.2). |
 | `ThreadMetadataStore` | `crates/agent_ui/src/thread_metadata_store.rs` | `session_id`, `agent_id`, título y rutas persistidos: reabrir el hilo de un puesto tras reiniciar. |
 | Flujo de login ACP | `conversation_view.rs` (`authenticate`) | Login de cuentas sin código nuevo (probado en cuentas.md). |
-| Worktrees | `crates/git/src/repository.rs` (`create_worktree`, `remove_worktree`), `crates/project/src/git_store.rs` | Worktree por programador (Fase 4). |
-| Revisión de rama | `crates/git_ui/src/branch_diff.rs` (`review_diff`, `ReviewBranchDiff`) | Paso de revisión (Fase 4). |
-| `context_server::listener::McpServer` | `crates/context_server/src/listener.rs` | Servidor MCP en proceso, existe pero nadie lo usa (Fase 3). |
+| Worktrees | `crates/git/src/repository.rs` (`create_worktree`, `remove_worktree`), `crates/project/src/git_store.rs` | Worktree por programador (Fase 3). |
+| Revisión de rama | `crates/git_ui/src/branch_diff.rs` (`review_diff`, `ReviewBranchDiff`) | Paso de revisión (Fase 3). |
+| `context_server::listener::McpServer` | `crates/context_server/src/listener.rs` | Servidor MCP en proceso, existe pero nadie lo usa (Fase 4). |
 
 ### 1.3 Puntos de enganche en código de Zed
 
@@ -62,11 +63,13 @@ Mínimos e imprescindibles:
 | 1 | `Cargo.toml`, `crates/zed/Cargo.toml` | Añadir el crate `office`. |
 | 1 | `crates/zed/src/main.rs` (~722) | `office::init(cx)` tras `agent_ui::init`. |
 | 1 | `crates/zed/src/zed.rs` (`initialize_panels`, ~778) | Cargar `OfficePanel` con `setup_or_teardown_ai_panel` para que desaparezca con `disable_ai`, igual que `AgentPanel`. `activation_priority` libre: 4 u 8+ (se usan 0-3 y 5-7; repetir una prioridad hace `panic` en debug). |
+| 1 | `crates/acp_thread/src/acp_thread.rs` (peticiones de permiso, `fs/write_text_file`, `terminal/create`) | Gancho de política: antes de mostrar una petición de permiso o ejecutar una escritura/terminal, consultar una política registrable (aprobar, rechazar o pedir al usuario). Sin política registrada, comportamiento actual. Ver 2.7. |
 | 2 | `crates/acp_thread/src/connection.rs` | Opciones de sesión (`SessionOptions { system_prompt, extra_mcp_servers }`) en `new_session` / `load_session` / `resume_session`, con valor por defecto vacío para no romper a los demás implementadores. |
-| 2 | `crates/agent_servers/src/acp/v1.rs` (~1209) y `v2.rs` (~1296) | Poner `system_prompt` en `NewSessionRequest` (y load/resume) si el agente anuncia `sessionCapabilities.systemPrompt`; añadir `extra_mcp_servers` a los del proyecto. |
+| 2 | `crates/agent_servers/src/acp/v1.rs` (~1209) y `v2.rs` (~1296) | Poner `system_prompt` en `NewSessionRequest` (y load/resume) si el agente anuncia `sessionCapabilities.systemPrompt`; añadir `extra_mcp_servers` a los del proyecto (los usa la Fase 4). |
 | 2 | `crates/agent_ui/src/agent_panel.rs` (`CreateThreadOptions`, 935) y `conversation_view.rs` (`initial_state`, 1317) | Llevar `SessionOptions` desde la creación del hilo hasta `new_session`, y guardarlas para reanudar. |
-| 3 | `crates/zed/src/main.rs` | Puente stdio ↔ socket para el MCP del orquestador (antes existía como `--nc`). |
-| 4 | `crates/git/src/repository.rs` + `git_store.rs` | `merge` (no existe) si la integración la hace UACode y no el agente integrador (ver 5.3). |
+| 4 | `crates/zed/src/main.rs` | Solo si el transporte MCP elegido en la Fase 0 es el puente stdio. Con HTTP no se toca. |
+
+El merge (Fase 3) no toca código de Zed: lo ejecuta `crates/office` con el CLI de git (ver 4.3).
 
 Fuera de esto, todo vive en `crates/office`. Cada cambio en Zed debe ir en un commit aislado para facilitar futuras sincronizaciones con Zed.
 
@@ -155,7 +158,7 @@ Ficha de puesto en `office.json`:
       "model": "sonnet",                 // opcional; vacío = el del agente
       "instructions": "roles/backend.md",// ruta relativa a .uacode/office/
       "extra_instructions": "",          // texto corto específico del proyecto
-      "worktree": true,                  // programador: trabaja en su worktree (Fase 4)
+      "worktree": true,                  // programador: trabaja en su worktree (Fase 3)
       "thread_id": null                  // lo rellena Office
     }
   ]
@@ -163,6 +166,46 @@ Ficha de puesto en `office.json`:
 ```
 
 La cuenta va por id, nunca por ruta, para que `office.json` sea portable entre máquinas: cada usuario resuelve el id en su `accounts.json`. Si la cuenta no existe en la máquina, el puesto aparece como "Sin cuenta".
+
+Ajustes generales de la oficina, también en `office.json`:
+
+```jsonc
+{
+  "max_working_agents": 3,   // límite de puestos en "Trabajando" a la vez
+  "posts": [ /* … */ ]
+}
+```
+
+### 2.6 Límite de concurrencia y consumo
+
+- **Límite de agentes trabajando**: `max_working_agents` (configurable desde el panel). Al enviar una tarea con el límite alcanzado, la tarea queda **en cola** en la tarjeta ("En cola, posición N") y se envía cuando un puesto pasa a Libre. El usuario puede forzar el envío.
+- **Consumo por puesto**: ACP lo expone con la actualización de sesión `usage_update` (`used`, `size` del contexto y `cost` opcional), y UACode ya lo recoge en `AcpThread::token_usage()` y el coste del hilo (`acp_thread.rs:5145`, evento `TokenUsageUpdated`). La tarjeta muestra el uso de contexto del hilo, el coste si el adaptador lo envía y un acumulado por puesto (guardado en `office.json`). Si un adaptador no envía uso, se muestra "—". Qué envía cada adaptador se comprueba en la Fase 0.
+
+### 2.7 Permisos por rol
+
+Reglas pedidas:
+
+1. Los programadores solo editan dentro de su worktree.
+2. QA puede ejecutar tests.
+3. Ningún agente hace `push`.
+4. Las acciones destructivas siempre requieren aprobación del usuario.
+
+Se aplican en dos capas, porque ninguna basta sola:
+
+**Capa 1: política de Office en UACode** (gancho de 1.3). Todo lo que el agente pide a UACode pasa por ella:
+
+| Petición ACP | Regla |
+| --- | --- |
+| `fs/write_text_file` | Fuera del `cwd`/worktree del puesto: rechazar (programadores) o pedir aprobación (resto) |
+| `terminal/create` | Comando con `git push` (o alias): rechazar siempre. Destructivo (`rm -rf`, `git reset --hard`, `git clean`, `git branch -D`, `git push --force`, borrado fuera del worktree, `DROP`…): pedir aprobación. Tests (`cargo test`, `npm test`, `pytest`…): permitido para QA y programadores |
+| `session/request_permission` | Se evalúa el contenido (comando, rutas) con las mismas reglas: aprobar automáticamente lo permitido por el rol, rechazar lo prohibido, y el resto al usuario |
+
+**Capa 2: límites del propio agente**, para lo que no pasa por UACode:
+
+- Codex: modo con sandbox `workspace-write`, que limita la escritura al `cwd` y a `additionalDirectories`. Sus comandos piden aprobación por `session/request_permission`.
+- Claude: modo de permisos que no sea `bypassPermissions`, para que las herramientas `Edit`/`Bash` pidan permiso por ACP. Reglas `deny` por sesión (vía `_meta.claudeCode.options.settings`, solo Claude) para `git push`.
+
+Limitación: lo que el agente ejecuta sin pedir permiso (reglas `allow` de la propia cuenta, modos permisivos) no llega a UACode. Office debe arrancar las sesiones en el modo de permisos adecuado y avisar en la tarjeta si el modo actual del agente es permisivo.
 
 ## 3. Fase 2: roles y directrices
 
@@ -191,35 +234,11 @@ Alternativas descartadas como mecanismo principal:
 - `_meta.jetbrains.air.customInstructions`: funciona en los dos, pero es una extensión privada de JetBrains; queda como plan B si `systemPrompt` diese problemas.
 - `CLAUDE.md` / `AGENTS.md` por puesto: afectan a todas las sesiones de la cuenta y del proyecto, no a un puesto.
 
-## 4. Fase 3: orquestador
+## 4. Fase 3: worktree por programador
 
-### 4.1 Viabilidad
+El orquestador (Fase 4) no lanza programadores en paralelo hasta que esta fase esté hecha: sin worktrees, varios programadores en el mismo árbol se pisan.
 
-- **ACP permite `mcpServers` por sesión**: es un campo de `NewSessionRequest` (también en load/resume), y los dos adaptadores lo usan (`acp-agent.js:8303-8328`, `index.js:39490-39531`).
-- Transportes: Claude anuncia `http` y `sse` (stdio implícito); Codex acepta `stdio` y `http`, **no** `sse`. Común: **stdio** y **http**.
-- Hoy UACode solo reenvía los servidores MCP del proyecto (`mcp_servers_for_project`, `v1.rs:9985`). Hace falta añadir `extra_mcp_servers` por sesión (la misma `SessionOptions` de la Fase 2), y solo el puesto orquestador los recibe.
-- Codex ignora un servidor si ya existe uno con el mismo nombre en su `config.toml`: usar un nombre propio (`uacode-office`).
-
-### 4.2 Servidor MCP de Office
-
-Herramientas:
-
-| Herramienta | Entrada | Efecto |
-| --- | --- | --- |
-| `listar_agentes` | — | Puestos con rol, proveedor, estado y tarea actual |
-| `asignar_tarea` | `puesto`, `tarea`, `contexto?` | Crea o reutiliza el hilo del puesto y envía la tarea (`initial_content` con `auto_submit`) |
-| `ver_estado` | `puesto` | Estado, tarea actual, último mensaje y plan |
-| `pedir_aprobacion` | `resumen`, `detalle` | Muestra la petición en el panel Office y espera la respuesta del usuario (aprobar / rechazar + comentario) |
-
-Transporte recomendado: **stdio con puente**, reutilizando `context_server::listener::McpServer` (servidor MCP en proceso sobre socket local; en Windows usa AF_UNIX del crate `net`). Al orquestador se le pasa `McpServer::Stdio { command: <uacode.exe>, args: ["--office-mcp", <socket>] }`, y ese modo de `uacode.exe` solo copia stdio ↔ socket. Es el diseño que Zed tuvo para Claude Code (`ClaudeZedMcpServer` con `--nc`, retirado en `930189ed83`).
-
-Alternativa: endpoint HTTP local (`127.0.0.1`, puerto aleatorio, token por sesión en cabecera). Evita el puente, pero requiere servidor HTTP en UACode (dependencia nueva) y cuidar la exposición local. Queda como plan B.
-
-Seguridad: el socket solo vive mientras UACode está abierto, va en el directorio temporal del usuario y solo se pasa a la sesión del orquestador. `asignar_tarea` no puede cambiar la cuenta ni las instrucciones de un puesto. Las aprobaciones siempre las da el usuario.
-
-## 5. Concurrencia: worktree por programador
-
-### 5.1 Qué existe
+### 4.1 Qué existe
 
 - `Repository::create_worktree(CreateWorktreeTarget::NewBranch { branch_name, base_sha }, path)` y `remove_worktree` (`git_store.rs:9245`, `:9547`); carpeta según `git.worktree_directory` (por defecto `../worktrees`).
 - La herramienta de agente `create_thread` ya crea hilos en worktree nuevo, abriendo un *workspace* aparte (`agent_panel.rs:4905-4992`).
@@ -228,20 +247,58 @@ Seguridad: el socket solo vive mientras UACode está abierto, va en el directori
 - Archivado: `thread_worktree_archive.rs` guarda el trabajo en `refs/archived-worktrees/<id>` y quita el worktree.
 - **No existe `git merge`** en el backend ni en la UI.
 
-### 5.2 Propuesta
+### 4.2 Propuesta
 
 1. Al asignar tarea a un puesto programador (`worktree: true`): crear rama `office/<puesto>/<tarea-corta>` desde `HEAD` de la rama de integración y su worktree en `<worktree_directory>/<proyecto>/office-<puesto>`.
 2. Crear el hilo con `work_dirs = [ruta del worktree]`, en el mismo *workspace* (no abrir ventana nueva). Hay que validar que las ediciones y terminales del agente funcionan fuera de los worktrees del proyecto (riesgo R5); si no, abrir un *workspace* por worktree como hace `create_thread`.
 3. El programador hace commits en su rama (instrucción de rol).
 4. Al terminar: la tarjeta pasa a "Pendiente de revisión"; Office envía el diff de la rama al puesto **tech lead/revisor** (`ReviewBranchDiff` con `base_ref` = rama de integración).
-5. Revisor aprueba → **integración**: `git merge --no-ff office/<puesto>/<tarea>` en la rama de integración.
-6. Conflictos: vista de conflictos existente y `ResolveConflictsWithAgent`.
+5. Revisor aprueba → la tarjeta pasa a "Lista para integrar" y espera **tu aprobación** (botón "Integrar" con el resumen del diff y del informe del revisor).
+6. Con tu aprobación, **UACode** ejecuta el merge (4.3).
 7. Tras el merge: quitar el worktree (o archivarlo con el mecanismo existente) y borrar la rama.
 
-### 5.3 Quién hace el merge
+### 4.3 Merge
 
-- **Opción A (recomendada para empezar)**: el revisor o un puesto integrador ejecuta el merge con su terminal en el worktree principal, tras `pedir_aprobacion`. Cero código nuevo en `crates/git`.
-- **Opción B**: `merge` nativo en `crates/git` + `git_store` + botón en Office. Más control y mejor UX, pero toca código de Zed (y RPC para proyectos remotos).
+Lo ejecuta UACode directamente con el CLI de git, desde `crates/office/src/worktrees.rs`, sin tocar `crates/git`:
+
+1. Comprobar que el árbol principal está limpio (`git status --porcelain`) y en la rama de integración; si no, no se hace nada y se avisa.
+2. `git merge --no-ff --no-edit office/<puesto>/<tarea>` en el worktree principal.
+3. **Sin conflictos**: se registra el commit de merge, se quita el worktree (`git worktree remove`) y se borra la rama (`git branch -d`, nunca `-D`).
+4. **Con conflictos**: el merge queda abierto y se muestra la vista de conflictos existente. Solo entonces interviene un agente: el botón "Resolver con agente" usa `ResolveConflictsWithAgent` (o envía la tarea al puesto revisor). Para abortar: `git merge --abort`.
+5. Nunca `push`: integrar es local. Publicar la rama sigue siendo cosa tuya.
+
+Los comandos se lanzan con el ejecutable de git que ya usa UACode, con `cwd` explícito y argumentos separados (sin pasar por shell), y su salida se muestra en la tarjeta si fallan.
+
+## 5. Fase 4: orquestador
+
+### 5.1 Viabilidad
+
+- **ACP permite `mcpServers` por sesión**: es un campo de `NewSessionRequest` (también en load/resume), y los dos adaptadores lo usan (`acp-agent.js:8303-8328`, `index.js:39490-39531`).
+- Transportes: Claude anuncia `http` y `sse` (stdio implícito); Codex acepta `stdio` y `http`, **no** `sse`. Común: **stdio** y **http**.
+- Hoy UACode solo reenvía los servidores MCP del proyecto (`mcp_servers_for_project`, `v1.rs:9985`). Hace falta añadir `extra_mcp_servers` por sesión (la misma `SessionOptions` de la Fase 2), y solo el puesto orquestador los recibe.
+- Codex ignora un servidor si ya existe uno con el mismo nombre en su `config.toml`: usar un nombre propio (`uacode-office`).
+
+### 5.2 Servidor MCP de Office
+
+Herramientas:
+
+| Herramienta | Entrada | Efecto |
+| --- | --- | --- |
+| `listar_agentes` | — | Puestos con rol, proveedor, estado y tarea actual |
+| `asignar_tarea` | `puesto`, `tarea`, `contexto?` | Crea o reutiliza el hilo del puesto y envía la tarea (`initial_content` con `auto_submit`). Respeta el límite de concurrencia y, para programadores, crea su worktree (Fase 3) |
+| `ver_estado` | `puesto` | Estado, tarea actual, último mensaje y plan |
+| `pedir_aprobacion` | `resumen`, `detalle` | Muestra la petición en el panel Office y espera la respuesta del usuario (aprobar / rechazar + comentario) |
+
+### 5.3 Transporte
+
+Se decide en la Fase 0 entre:
+
+- **HTTP en `127.0.0.1`**, puerto aleatorio, token aleatorio por sesión en la cabecera `Authorization`. Lo arranca `crates/office`; **no toca `main.rs`**. Los dos adaptadores admiten `http`.
+- **Puente stdio**: `context_server::listener::McpServer` sobre socket local y un modo de `uacode.exe` que copia stdio ↔ socket. Requiere tocar `main.rs`.
+
+Criterio: preferir el que menos toque `main.rs` (HTTP), salvo motivo técnico de peso. Resultado en [spike.md](spike.md).
+
+Seguridad: el endpoint solo vive mientras UACode está abierto, solo escucha en `127.0.0.1`, exige el token de la sesión y solo se pasa a la sesión del orquestador. `asignar_tarea` no puede cambiar la cuenta, el rol ni los permisos de un puesto. Las aprobaciones siempre las da el usuario.
 
 ## 6. Plan de implementación
 
@@ -249,13 +306,13 @@ Tamaños: S ≤ 2 días, M 3-5 días, L 1-2 semanas (una persona, incluye tests)
 
 | Fase | Contenido | Tamaño | Toca Zed |
 | --- | --- | --- | --- |
-| **0. Spike** | Validar: varias sesiones en un proceso del adaptador; `systemPrompt` append real en los dos adaptadores; `set_config_option` de modelo; hilo con `work_dirs` fuera del proyecto | S | No (rama de prueba) |
-| **1. Panel y puestos** | Crate `office`, `OfficePanel`, tarjetas con estado, `office.json`/`accounts.json`, gestor de cuentas, sincronización de `agent_servers`, clic → hilo, reanudar tras reiniciar | L | Cargo, `main.rs`, `zed.rs` |
+| **0. Spike** | Validar: varias sesiones en un proceso; `systemPrompt` append; hilo con `cwd` en worktree externo; MCP por sesión (HTTP y stdio); `set_config_option` de modelo; qué consumo envía cada adaptador | S | No (rama `office-spike`, desechable) |
+| **1. Panel y puestos** | Crate `office`, `OfficePanel`, tarjetas con estado, `office.json`/`accounts.json`, gestor de cuentas, sincronización de `agent_servers`, clic → hilo, reanudar tras reiniciar, límite de concurrencia con cola, consumo por puesto, permisos por rol (gancho de política) | L+ | Cargo, `main.rs`, `zed.rs`, `acp_thread` (gancho) |
 | **2. Roles** | `SessionOptions` (system prompt) de la creación del hilo a `session/new`/load/resume; plantillas de los 12 roles; modelo por puesto | M | `acp_thread`, `agent_servers` v1/v2, `agent_ui` |
-| **3. Orquestador** | `extra_mcp_servers` por sesión; servidor MCP con las 4 herramientas; puente stdio; UI de aprobaciones en el panel | L | `main.rs` (puente) + lo de la Fase 2 |
-| **4. Worktrees e integración** | Worktree y rama por programador; flujo revisor; merge (opción A); limpieza | M (A) / L (B) | No (A) / `crates/git` (B) |
+| **3. Worktrees e integración** | Worktree y rama por programador; flujo revisor; aprobación del usuario; merge con el CLI de git; conflictos con agente; limpieza | M | No |
+| **4. Orquestador** | `extra_mcp_servers` por sesión; servidor MCP con las 4 herramientas; UI de aprobaciones en el panel | L | Solo si el transporte es stdio (`main.rs`) |
 
-Orden: 0 → 1 → 2 → 3 → 4. Las fases 1 y 2 aportan valor por sí solas; 3 y 4 dependen de 2.
+Orden: 0 → 1 → 2 → 3 → 4. Las fases 1 y 2 aportan valor por sí solas. La 3 depende de 1; la 4 depende de 2 (`extra_mcp_servers`) y de 3 (no hay programadores en paralelo sin worktrees).
 
 ### Riesgos
 
@@ -267,7 +324,9 @@ Orden: 0 → 1 → 2 → 3 → 4. Las fases 1 y 2 aportan valor por sí solas; 3
 | R4 | Varias sesiones en el mismo proceso del adaptador (puestos con la misma cuenta) | Validar en el spike; si falla, un agente por puesto (más procesos) |
 | R5 | Hilo con `cwd` en un worktree fuera del proyecto: ediciones/terminales del agente | Validar en el spike; alternativa: *workspace* por worktree |
 | R6 | Límites de uso de las cuentas con muchos puestos en paralelo | Mostrar el estado de la cuenta; límite de puestos trabajando a la vez por cuenta |
-| R7 | Seguridad del MCP de Office (cualquier proceso local podría hablar con el socket) | Socket en directorio temporal del usuario, solo mientras UACode está abierto, nombre aleatorio; aprobaciones siempre humanas |
+| R7 | Seguridad del MCP de Office (cualquier proceso local podría hablar con el endpoint) | Solo `127.0.0.1` y token aleatorio por sesión (HTTP) o socket con nombre aleatorio en el temporal del usuario (stdio); solo mientras UACode está abierto; aprobaciones siempre humanas |
+| R10 | Los permisos por rol no cubren lo que el agente ejecuta sin pedir permiso | Sesiones en modo no permisivo, sandbox de Codex `workspace-write`, aviso en la tarjeta si el modo es permisivo (2.7) |
+| R11 | Merge sobre un árbol principal con cambios sin commitear | Comprobar `git status` antes; no integrar si no está limpio |
 | R8 | Coste y ruido: doce agentes generando a la vez | Puestos creados bajo demanda; el orquestador asigna y no todos trabajan a la vez |
 | R9 | Virtualización de `%APPDATA%` (cuentas.md) | No aplica: Office escribe desde UACode, que no está empaquetado |
 
