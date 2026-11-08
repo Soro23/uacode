@@ -147,7 +147,11 @@ Un agente por **(proveedor, cuenta)**, no por puesto: los puestos que comparten 
 
 Ambos archivos JSON (`office.json` y `accounts.json`) incluyen un campo `version` desde el inicio, con validación y tests de serialización, JSON inválido y referencias inexistentes.
 
-Ficha de puesto en `office.json`:
+En Fase 1, paso 2, la ubicación es el primer worktree visible que sea una carpeta local, siguiendo el orden del proyecto. Sin carpeta local no se crea nada. `.uacode/office.json` se crea solo al guardar el primer puesto. Las escrituras usan `Fs::atomic_write` (temporal en el mismo volumen y reemplazo atómico), con comprobación del contenido original para detectar cambios externos. JSON inválido: solo lectura, error con línea/columna y «Abrir archivo». Versión futura: solo lectura y aviso. Los campos desconocidos se rechazan para no perderlos al guardar. «Recargar» vuelve a leer tras una corrección externa.
+
+La ficha inicial del paso 2 contiene `id` estable, `name`, `role`, `provider`, `account` opcional (sin asignar), `model`, `instructions` y `archived`. Modelo e instrucciones se guardan sin aplicarse hasta Fase 2; el resto de campos se añadirá en su fase. La posición del dock se guarda en la base de datos local de UACode, sin escribir settings.json.
+
+Ficha completa prevista en `office.json`:
 
 ```jsonc
 {

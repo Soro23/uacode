@@ -8,7 +8,8 @@ Actualizado: 2026-11-08.
 - Rebranding y prueba de cuentas completados: login sin API keys, aislamiento, concurrencia y persistencia comprobados en Windows.
 - Fase 0 completada. `office-spike` contiene código desechable y no se fusiona.
 - Fase 1, paso 1: implementado el crate office con panel vacío, acción `office: toggle focus`, botón de dock y respeto de disable_ai. Compilación y arranque comprobados; apertura por paleta, cierre/reapertura por botón y traslado derecha → izquierda → derecha verificados visualmente.
-- Sin lógica de cuentas, persistencia ni procesos ACP todavía. Posición inicial derecha; traslado entre docks en memoria, sin nuevos ajustes globales.
+- Fase 1, paso 2: puestos persistentes en `.uacode/office.json` (commit `d0539a0d60`). Crear, editar y archivar puestos; JSON inválido o versión futura en solo lectura con «Abrir archivo» y «Recargar»; posición del dock persistida en la base de datos local.
+- Sin lógica de cuentas ni procesos ACP todavía.
 
 ## Decisiones vigentes
 
@@ -28,9 +29,11 @@ Actualizado: 2026-11-08.
 - office.json y accounts.json incluyen `version` desde el inicio; tests unitarios de serialización, JSON inválido y referencias inexistentes en pasos 2, 3 y 11.
 - Paso 4: evaluar registro dinámico en AgentServerStore; explicar inviabilidad antes de escribir settings.json. Paso 5: gancho mínimo aislado con test de hilos ajenos a Office. Pasos 7 y 8 pueden unirse si son pequeños.
 
+- office.json vive en el primer worktree visible que sea carpeta local; proyectos remotos muestran un aviso y no crean nada. Campos desconocidos se rechazan (solo lectura) para no perderlos al guardar.
+
 ## Siguiente paso
 
-Mensaje #2: paso 1 revisado y paso 2 autorizado. Implementar fichas persistentes con versionado y tests de serialización/errores. No avanzar sin visto bueno.
+Paso 2 y ajustes 1–4 del mensaje #2 completados. Pendiente revisión y autorización del paso 3. No avanzar sin visto bueno.
 
 ## Reglas de trabajo
 
@@ -61,3 +64,22 @@ Mensaje #2: paso 1 revisado y paso 2 autorizado. Implementar fichas persistentes
 - 2026-11-08: completado el paso 1 de Fase 1 (panel vacío). Próximo paso sujeto a confirmación: puestos persistentes.
 
 - 2026-11-08, mensaje #2: aislado el error de carga de Office en zed.rs: se registra con log::error y no impide cargar AgentPanel. Paso 2 autorizado; pendiente prueba manual de disable_ai y persistencia de puestos.
+
+- 2026-11-08: Codex se detuvo a mitad del paso 2; lo retoma Claude. El trabajo sin commit no compilaba (dos errores de préstamo en office_panel.rs) y los tests asíncronos descartaban sus errores (`gpui::test` ignora el `Result`). Corregido, añadido test de campos desconocidos, aviso de proyecto remoto y de puestos todos archivados.
+
+## Verificación del paso 2
+
+- `cargo test -p office`: 7 tests correctos. `cargo clippy -p office --all-targets -- --deny warnings` (debug): sin avisos. `cargo fmt -p office` aplicado.
+- Tiempos del ciclo debug en esta máquina:
+  - `cargo check -p office`, incremental: ~12 s.
+  - `cargo test -p office`: primera compilación de tests 10 min 14 s; incremental ~15 s.
+  - `cargo clippy -p office` (debug): 2 min 10 s la primera vez.
+  - `cargo build -p zed` debug incremental: 1 min 49 s.
+- `script/clippy` usa `--release`; para iterar se usa clippy en debug con las mismas opciones.
+- Con la app debug (`target/debug/uacode.exe`) y carpeta de prueba en `target/office-step2-test/proyecto`:
+  - Al abrir el panel no se crea `.uacode`; se crea al guardar el primer puesto.
+  - Crear (con proveedor Codex y modelo), archivar, mostrar archivados y restaurar: correcto, JSON escrito como se espera.
+  - JSON inválido: aviso con línea y columna, «Abrir archivo» abre office.json, «Nuevo puesto» deshabilitado. Versión futura: solo lectura con aviso.
+  - disable_ai (en `.uacode/settings.json` del proyecto) activado y desactivado en caliente: el panel y su botón desaparecen y vuelven.
+  - Dock movido a la izquierda, app reiniciada: se mantiene a la izquierda. Devuelto a la derecha.
+- Con la app debug, abrir una carpeta por argumento avisa de que falta `cli.exe` (solo afecta a askpass); no impide el arranque.
