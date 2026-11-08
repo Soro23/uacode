@@ -153,6 +153,7 @@ Pendiente de rellenar tras las pruebas.
 
 ## Problemas conocidos / a vigilar
 
+- **Virtualización MSIX al configurar desde la app de Claude (Windows)**: la app de escritorio de Claude está empaquetada, y los procesos que lanza no escriben en el `%APPDATA%` real. Sus escrituras se desvían a `%LOCALAPPDATA%\Packages\Claude_<id>\LocalCache\Roaming\...`, y esos procesos leen la copia desviada como si fuera la real. UACode no ve esos cambios. Las carpetas y el `settings.json` hay que crearlos desde un proceso no empaquetado, por ejemplo la terminal integrada de UACode. El gestor de cuentas de la fase Office evitará el problema, porque lo hará la propia UACode.
 - `npx.cmd` es obligatorio en Windows; `npx` es un script `.ps1`.
 - `env` no expande variables (`%APPDATA%`), hay que usar rutas absolutas.
 - Si un agente aparece como no registrado, revisar el nombre y que `"type": "custom"` esté presente.
