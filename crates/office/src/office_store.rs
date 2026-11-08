@@ -1,11 +1,14 @@
-use anyhow::{Context as _, Result, ensure};
-use fs::Fs;
+use crate::versioned_file::{StoredFile, VersionedDocument};
+use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashSet, path::Path};
+use std::collections::HashSet;
 
 pub const OFFICE_VERSION: u32 = 1;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub type OfficeFile = StoredFile<OfficeDocument>;
+pub use crate::versioned_file::{load, save};
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Provider {
     #[default]
@@ -14,10 +17,20 @@ pub enum Provider {
 }
 
 impl Provider {
+    pub const ALL: [Provider; 2] = [Provider::Claude, Provider::Codex];
+
     pub fn label(&self) -> &'static str {
         match self {
             Self::Claude => "Claude",
             Self::Codex => "Codex",
+        }
+    }
+
+    /// Prefix used for credential folders, e.g. `claude-default`.
+    pub fn slug(&self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
         }
     }
 }
@@ -29,6 +42,7 @@ pub struct Post {
     pub name: String,
     pub role: String,
     pub provider: Provider,
+    /// Account id from accounts.json; `None` means the provider's default account.
     #[serde(default)]
     pub account: Option<String>,
     #[serde(default)]
@@ -37,6 +51,15 @@ pub struct Post {
     pub instructions: String,
     #[serde(default)]
     pub archived: bool,
+}
+
+impl Post {
+    pub fn set_provider(&mut self, provider: Provider) {
+        if self.provider != provider {
+            self.provider = provider;
+            self.account = None;
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,12 +85,15 @@ impl Default for OfficeDocument {
     }
 }
 
-impl OfficeDocument {
+impl VersionedDocument for OfficeDocument {
+    const VERSION: u32 = OFFICE_VERSION;
+    const FILE_NAME: &'static str = "office.json";
+
+    fn version(&self) -> u32 {
+        self.version
+    }
+
     fn validate(&self) -> Result<()> {
-        ensure!(
-            self.version == OFFICE_VERSION,
-            "Versión de Office no compatible"
-        );
         ensure!(
             self.max_working_agents > 0,
             "El límite de concurrencia debe ser positivo"
@@ -93,94 +119,11 @@ impl OfficeDocument {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct OfficeFile {
-    pub document: OfficeDocument,
-    pub warning: Option<String>,
-    original: Option<String>,
-}
-
-impl OfficeFile {
-    pub fn is_read_only(&self) -> bool {
-        self.warning.is_some()
-    }
-
-    pub fn exists_on_disk(&self) -> bool {
-        self.original.is_some()
-    }
-
-    fn decode(original: Option<String>) -> Self {
-        let mut file = Self {
-            document: OfficeDocument::default(),
-            warning: None,
-            original,
-        };
-        if let Some(text) = &file.original {
-            let parsed = (|| -> Result<OfficeDocument> {
-                let value: serde_json::Value = serde_json::from_str(text)?;
-                let version = value.get("version").and_then(|version| version.as_u64());
-                if let Some(version) = version {
-                    ensure!(
-                        version <= u64::from(OFFICE_VERSION),
-                        "versión {version} creada por una app más nueva; esta admite hasta {OFFICE_VERSION}"
-                    );
-                }
-                let document: OfficeDocument = serde_json::from_str(text)?;
-                document.validate()?;
-                Ok(document)
-            })();
-            match parsed {
-                Ok(document) => file.document = document,
-                Err(error) => {
-                    file.warning = Some(format!("office.json en solo lectura: {error:#}"))
-                }
-            }
-        }
-        file
-    }
-}
-
-pub async fn load(fs: &dyn Fs, path: &Path) -> Result<OfficeFile> {
-    let original = if fs.metadata(path).await?.is_some() {
-        Some(fs.load(path).await?)
-    } else {
-        None
-    };
-    Ok(OfficeFile::decode(original))
-}
-
-pub async fn save(
-    fs: &dyn Fs,
-    path: &Path,
-    previous: &OfficeFile,
-    document: OfficeDocument,
-) -> Result<OfficeFile> {
-    ensure!(
-        !previous.is_read_only(),
-        "Office está en solo lectura; corrige el archivo y pulsa Recargar"
-    );
-    document.validate()?;
-    let current = load(fs, path).await?;
-    ensure!(
-        current.original == previous.original,
-        "office.json cambió en disco; pulsa Recargar antes de guardar"
-    );
-    let text = serde_json::to_string_pretty(&document)? + "\n";
-    let parent = path
-        .parent()
-        .context("office.json no tiene carpeta padre")?;
-    fs.create_dir(parent).await?;
-    fs.atomic_write(path.to_path_buf(), text.clone()).await?;
-    Ok(OfficeFile {
-        document,
-        warning: None,
-        original: Some(text),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fs::Fs;
+    use std::path::Path;
 
     fn sample() -> OfficeDocument {
         OfficeDocument {
@@ -261,7 +204,7 @@ mod tests {
 
     async fn check_missing_file(fs: &dyn Fs) -> Result<()> {
         let path = Path::new("/project/.uacode/office.json");
-        let file = load(fs, path).await?;
+        let file: OfficeFile = load(fs, path).await?;
         assert_eq!(file.document, OfficeDocument::default());
         assert!(!file.is_read_only());
         assert!(fs.metadata(Path::new("/project/.uacode")).await?.is_none());
@@ -278,19 +221,19 @@ mod tests {
 
     async fn check_save_and_protection(fs: &dyn Fs) -> Result<()> {
         let path = Path::new("/project/.uacode/office.json");
-        let initial = load(fs, path).await?;
+        let initial: OfficeFile = load(fs, path).await?;
         let saved = save(fs, path, &initial, sample()).await?;
-        assert_eq!(load(fs, path).await?.document, sample());
+        assert_eq!(load::<OfficeDocument>(fs, path).await?.document, sample());
         fs.atomic_write(path.to_path_buf(), "{broken".into())
             .await?;
         assert!(save(fs, path, &saved, sample()).await.is_err());
         assert_eq!(fs.load(path).await?, "{broken");
-        let invalid = load(fs, path).await?;
+        let invalid: OfficeFile = load(fs, path).await?;
         assert!(save(fs, path, &invalid, sample()).await.is_err());
         let future_text = r#"{"version":999,"posts":[]}"#;
         fs.atomic_write(path.to_path_buf(), future_text.into())
             .await?;
-        let future = load(fs, path).await?;
+        let future: OfficeFile = load(fs, path).await?;
         assert!(save(fs, path, &future, sample()).await.is_err());
         assert_eq!(fs.load(path).await?, future_text);
         Ok(())

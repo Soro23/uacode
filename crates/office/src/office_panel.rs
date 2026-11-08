@@ -1,4 +1,8 @@
-use crate::office_store::{self, OfficeFile, Post, Provider};
+use crate::{
+    accounts::AccountChoice,
+    accounts_view::AccountsView,
+    office_store::{self, OfficeFile, Post, Provider},
+};
 use db::kvp::KeyValueStore;
 use fs::Fs;
 use gpui::{
@@ -7,7 +11,7 @@ use gpui::{
 };
 use project::Project;
 use std::{path::PathBuf, sync::Arc};
-use ui::prelude::*;
+use ui::{ContextMenu, DropdownMenu, prelude::*};
 use ui_input::InputField;
 use util::ResultExt as _;
 use workspace::{
@@ -29,6 +33,7 @@ pub struct OfficePanel {
     workspace: WeakEntity<Workspace>,
     project: Entity<Project>,
     fs: Arc<dyn Fs>,
+    accounts: Entity<AccountsView>,
     focus_handle: FocusHandle,
     position: DockPosition,
     path: Option<PathBuf>,
@@ -72,10 +77,13 @@ impl OfficePanel {
                         panel.refresh(false, cx);
                     }
                 });
+                let accounts = cx.new(|cx| AccountsView::new(workspace.clone(), fs.clone(), cx));
+                let accounts_subscription = cx.observe(&accounts, |_, _, cx| cx.notify());
                 let mut panel = Self {
                     workspace,
                     project,
                     fs,
+                    accounts,
                     focus_handle: cx.focus_handle(),
                     position,
                     path: None,
@@ -85,7 +93,7 @@ impl OfficePanel {
                     show_archived: false,
                     loading: false,
                     saving: false,
-                    _subscriptions: vec![subscription],
+                    _subscriptions: vec![subscription, accounts_subscription],
                     _load_task: Task::ready(()),
                     _save_task: Task::ready(()),
                 };
@@ -249,6 +257,53 @@ impl OfficePanel {
         }
     }
 
+    fn account_label(&self, post: &Post, cx: &App) -> String {
+        match self.accounts.read(cx).document() {
+            Some(document) => document.resolve(post).label(),
+            None if post.account.is_some() => "sin cargar".into(),
+            None => AccountChoice::Default.label(),
+        }
+    }
+
+    fn render_account_picker(
+        &self,
+        post: &Post,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> DropdownMenu {
+        let label = format!("Cuenta: {}", self.account_label(post, cx));
+        let mut options = vec![(None, AccountChoice::Default.label())];
+        if let Some(document) = self.accounts.read(cx).document() {
+            options.extend(
+                document
+                    .accounts_for(post.provider)
+                    .map(|account| (Some(account.id.clone()), account.name.clone())),
+            );
+        }
+        let panel = cx.weak_entity();
+        DropdownMenu::new(
+            "post-account",
+            label,
+            ContextMenu::build(window, cx, move |mut menu, _, _| {
+                for (account, name) in options {
+                    let panel = panel.clone();
+                    menu = menu.entry(name, None, move |_, cx| {
+                        panel
+                            .update(cx, |panel, cx| {
+                                if let Some(draft) = &mut panel.draft {
+                                    draft.post.account = account.clone();
+                                }
+                                cx.notify();
+                            })
+                            .log_err();
+                    });
+                }
+                menu
+            }),
+        )
+        .disabled(self.saving)
+    }
+
     fn open_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = self.path.clone() else {
             return;
@@ -353,7 +408,7 @@ impl Panel for OfficePanel {
 }
 
 impl Render for OfficePanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let writable = self.writable();
         let warning = self.file.as_ref().and_then(|file| file.warning.clone());
         let posts = self
@@ -425,15 +480,15 @@ impl Render for OfficePanel {
                         .disabled(self.saving)
                         .on_click(cx.listener(|panel, _, _, cx| {
                             if let Some(draft) = &mut panel.draft {
-                                draft.post.provider = match draft.post.provider {
+                                draft.post.set_provider(match draft.post.provider {
                                     Provider::Claude => Provider::Codex,
                                     Provider::Codex => Provider::Claude,
-                                };
+                                });
                             }
                             cx.notify();
                         })),
                     )
-                    .child(Label::new("Cuenta: sin asignar"))
+                    .child(self.render_account_picker(&draft.post, window, cx))
                     .child(draft.model.clone())
                     .child(draft.instructions.clone())
                     .child(
@@ -483,6 +538,7 @@ impl Render for OfficePanel {
         {
             let id = post.id.clone();
             let edit = post.clone();
+            let account = self.account_label(&post, cx);
             content = content.child(
                 v_flex()
                     .gap_1()
@@ -496,9 +552,9 @@ impl Render for OfficePanel {
                         post.provider.label()
                     )))
                     .child(Label::new(if post.archived {
-                        "Archivado"
+                        "Archivado".to_string()
                     } else {
-                        "Sin hilo · cuenta sin asignar"
+                        format!("Sin hilo · Cuenta: {account} · Sin probar")
                     }))
                     .child(Label::new(if post.model.is_empty() {
                         "Modelo: por defecto".into()
@@ -545,6 +601,14 @@ impl Render for OfficePanel {
             .bg(cx.theme().colors().panel_background)
             .overflow_y_scroll()
             .child(content)
+            .child(
+                div()
+                    .mt_4()
+                    .pt_4()
+                    .border_t_1()
+                    .border_color(cx.theme().colors().border)
+                    .child(self.accounts.clone()),
+            )
             .into_any_element()
     }
 }

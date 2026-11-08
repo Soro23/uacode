@@ -1,5 +1,8 @@
+mod accounts;
+mod accounts_view;
 mod office_panel;
 mod office_store;
+mod versioned_file;
 
 pub use office_panel::OfficePanel;
 
