@@ -35,7 +35,12 @@ Actualizado: 2026-11-08.
 
 ## Siguiente paso
 
-Paso 3 (mensaje #4) completado. Pendiente revisión y autorización del paso 4. No avanzar sin visto bueno.
+Paso 4 (mensaje #5), Fase A de investigación entregada en el buzón. Pendiente visto bueno para la Fase B (implementación). No escribir código antes.
+
+Resumen de la Fase A:
+- El registro dinámico es posible con la API pública, pero `reregister_agents` vacía el almacén en cada refresco del registro ACP y cierra las conexiones. Se propone un cambio aislado en `agent_server_store.rs` para conservar los agentes dinámicos.
+- Login: Claude 0.94.0 ofrece «Claude Subscription» como método terminal de primera clase y Codex 2.5.0 ofrece «ChatGPT» como método de agente; los dos conservan el env de la cuenta. El camino heredado `_meta terminal-auth` pierde el env, pero no se usa con estas versiones.
+- Estado e identidad: los dos adaptadores envían `_auth/status_update` (`kind` account/none y correo). UACode no lo procesa; se propone un sondeo propio de Office. `session/new` no detecta la falta de login en Claude. Los adaptadores escriben en su carpeta al arrancar, así que no se sondea si la carpeta no existe.
 
 ## Reglas de trabajo
 
