@@ -93,10 +93,9 @@ impl VersionedDocument for AccountsDocument {
                 account.provider.label(),
                 account.name
             );
-            if let Some(folder) = &account.folder {
-                validate_folder(folder)?;
-            }
+            // Also covers folders derived from a hand-edited id.
             let folder = account.folder_name();
+            validate_folder(&folder)?;
             ensure!(
                 Provider::ALL
                     .iter()
@@ -423,6 +422,20 @@ mod tests {
             };
             assert!(document.validate().is_err(), "{folder}");
         }
+        let document = AccountsDocument {
+            accounts: vec![Account {
+                id: "../x".into(),
+                provider: Provider::Claude,
+                name: "A".into(),
+                created_at: now(),
+                folder: None,
+            }],
+            ..AccountsDocument::default()
+        };
+        assert!(
+            document.validate().is_err(),
+            "a derived folder must be validated too"
+        );
     }
 
     // `gpui::test` discards the returned value, so failures must surface through `expect`.

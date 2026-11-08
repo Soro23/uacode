@@ -554,7 +554,10 @@ impl Render for OfficePanel {
                     .child(Label::new(if post.archived {
                         "Archivado".to_string()
                     } else {
-                        format!("Sin hilo · Cuenta: {account} · Sin probar")
+                        match self.accounts.read(cx).post_status_label(&post) {
+                            Some(status) => format!("Sin hilo · Cuenta: {account} · {status}"),
+                            None => format!("Sin hilo · Cuenta: {account}"),
+                        }
                     }))
                     .child(Label::new(if post.model.is_empty() {
                         "Modelo: por defecto".into()

@@ -1,27 +1,101 @@
 use crate::{
-    accounts::{self, AccountsDocument, AccountsFile, ImportReport, default_folder},
-    office_store::Provider,
+    account_agents::{self, AccountAgent, AccountKey, RegisteredAgents},
+    account_login,
+    accounts::{self, AccountChoice, AccountsDocument, AccountsFile, ImportReport, default_folder},
+    auth_status::{self, AuthStatus},
+    office_store::{Post, Provider},
     versioned_file,
 };
-use anyhow::Result;
+use anyhow::{Context as _, Result};
+use collections::HashMap;
 use fs::Fs;
 use futures::StreamExt as _;
-use gpui::{Context, Entity, Focusable as _, IntoElement, Render, Task, WeakEntity, Window};
-use std::{path::PathBuf, sync::Arc};
+use gpui::{
+    AsyncApp, Context, Entity, Focusable as _, IntoElement, Render, Task, WeakEntity, Window,
+};
+use project::Project;
+use std::{collections::VecDeque, path::PathBuf, sync::Arc};
 use time::OffsetDateTime;
 use ui::prelude::*;
 use ui_input::InputField;
 use util::ResultExt as _;
 use workspace::Workspace;
 
+const MAX_CONCURRENT_PROBES: usize = 2;
+
 struct AccountDraft {
     provider: Provider,
     name: Entity<InputField>,
 }
 
+/// Only kept in memory: the email and plan are never written to disk or logged.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AccountStatus {
+    Untested,
+    Queued,
+    Checking,
+    LoggingIn,
+    Connected {
+        email: Option<String>,
+        plan: Option<String>,
+    },
+    ConnectedWithOtherCredentials(String),
+    RequiresLogin,
+    Error(String),
+}
+
+impl AccountStatus {
+    fn from_probe(result: Result<Option<AuthStatus>>) -> Self {
+        match result {
+            Ok(None) | Ok(Some(AuthStatus::LoggedOut)) => Self::RequiresLogin,
+            Ok(Some(AuthStatus::Account { email, plan })) => Self::Connected { email, plan },
+            Ok(Some(AuthStatus::OtherCredentials { kind, label })) => {
+                Self::ConnectedWithOtherCredentials(label.unwrap_or(kind))
+            }
+            Err(error) => Self::Error(format!("{error:#}")),
+        }
+    }
+
+    fn label(&self) -> String {
+        match self {
+            Self::Untested => "Sin probar".into(),
+            Self::Queued => "En cola".into(),
+            Self::Checking => "Comprobando…".into(),
+            Self::LoggingIn => "Iniciando sesión…".into(),
+            Self::Connected { email, plan } => {
+                let mut label = "Conectada".to_string();
+                for detail in [email, plan].into_iter().flatten() {
+                    label.push_str(" · ");
+                    label.push_str(detail);
+                }
+                label
+            }
+            Self::ConnectedWithOtherCredentials(credentials) => {
+                format!("Conectada con {credentials}, no con la suscripción")
+            }
+            Self::RequiresLogin => "Requiere login".into(),
+            Self::Error(message) => format!("Error: {message}"),
+        }
+    }
+
+    fn color(&self) -> Color {
+        match self {
+            Self::Connected { .. } => Color::Success,
+            Self::ConnectedWithOtherCredentials(_) | Self::RequiresLogin => Color::Warning,
+            Self::Error(_) => Color::Error,
+            Self::Untested | Self::Queued | Self::Checking | Self::LoggingIn => Color::Muted,
+        }
+    }
+
+    fn is_busy(&self) -> bool {
+        matches!(self, Self::Queued | Self::Checking | Self::LoggingIn)
+    }
+}
+
 /// Global account catalog editor shown inside the Office panel.
 pub struct AccountsView {
     workspace: WeakEntity<Workspace>,
+    project: WeakEntity<Project>,
     fs: Arc<dyn Fs>,
     path: PathBuf,
     credentials_root: PathBuf,
@@ -31,14 +105,32 @@ pub struct AccountsView {
     draft: Option<AccountDraft>,
     loading: bool,
     saving: bool,
+    agents: RegisteredAgents,
+    agents_error: Option<String>,
+    statuses: HashMap<AccountKey, AccountStatus>,
+    probe_queue: VecDeque<AccountKey>,
+    // Dropping a task kills its adapter process, so removing an entry stops it.
+    probes: HashMap<AccountKey, Task<()>>,
+    logins: HashMap<AccountKey, Task<()>>,
     _load_task: Task<()>,
     _save_task: Task<()>,
 }
 
 impl AccountsView {
     pub fn new(workspace: WeakEntity<Workspace>, fs: Arc<dyn Fs>, cx: &mut Context<Self>) -> Self {
+        let project = workspace
+            .upgrade()
+            .map(|workspace| workspace.read(cx).project().downgrade())
+            .unwrap_or_else(WeakEntity::new_invalid);
+        cx.on_release(|view, cx| {
+            if let Some(project) = view.project.upgrade() {
+                view.agents.unregister_all(&project, cx);
+            }
+        })
+        .detach();
         let mut view = Self {
             workspace,
+            project,
             fs,
             path: accounts::accounts_path(),
             credentials_root: accounts::credentials_root(),
@@ -48,6 +140,12 @@ impl AccountsView {
             draft: None,
             loading: false,
             saving: false,
+            agents: RegisteredAgents::default(),
+            agents_error: None,
+            statuses: HashMap::default(),
+            probe_queue: VecDeque::default(),
+            probes: HashMap::default(),
+            logins: HashMap::default(),
             _load_task: Task::ready(()),
             _save_task: Task::ready(()),
         };
@@ -57,6 +155,27 @@ impl AccountsView {
 
     pub fn document(&self) -> Option<&AccountsDocument> {
         self.file.as_ref().map(|file| &file.document)
+    }
+
+    /// Status of the account a post uses, or `None` when the account is missing.
+    pub fn post_status_label(&self, post: &Post) -> Option<String> {
+        let document = self.document()?;
+        let key = match document.resolve(post) {
+            AccountChoice::Default => AccountKey {
+                provider: post.provider,
+                account_id: None,
+            },
+            AccountChoice::Account(account) => AccountKey {
+                provider: post.provider,
+                account_id: Some(account.id.clone()),
+            },
+            AccountChoice::Missing => return None,
+        };
+        Some(self.status(&key).label())
+    }
+
+    fn status(&self, key: &AccountKey) -> &AccountStatus {
+        self.statuses.get(key).unwrap_or(&AccountStatus::Untested)
     }
 
     pub fn reload(&mut self, cx: &mut Context<Self>) {
@@ -72,7 +191,10 @@ impl AccountsView {
             this.update(cx, |view, cx| {
                 view.loading = false;
                 match result {
-                    Ok(file) => view.file = Some(file),
+                    Ok(file) => {
+                        view.file = Some(file);
+                        view.sync_agents(cx);
+                    }
                     Err(error) => {
                         view.error = Some(format!("No se pudo leer accounts.json: {error:#}"))
                     }
@@ -81,6 +203,114 @@ impl AccountsView {
             })
             .log_err();
         });
+        cx.notify();
+    }
+
+    /// Registering does not start any process; adapters only run on login or check.
+    fn sync_agents(&mut self, cx: &mut Context<Self>) {
+        let (Some(project), Some(document)) = (self.project.upgrade(), self.document()) else {
+            return;
+        };
+        if !project.read(cx).is_local() {
+            return;
+        }
+        let agents = account_agents::account_agents(document, &self.credentials_root);
+        match self.agents.sync(agents, &project, cx) {
+            Ok(removed) => {
+                self.agents_error = None;
+                for agent in removed {
+                    self.forget_account(&agent.key);
+                }
+            }
+            Err(error) => self.agents_error = Some(format!("{error:#}")),
+        }
+    }
+
+    fn forget_account(&mut self, key: &AccountKey) {
+        self.statuses.remove(key);
+        self.probe_queue.retain(|queued| queued != key);
+        self.probes.remove(key);
+        self.logins.remove(key);
+    }
+
+    fn check(&mut self, key: AccountKey, cx: &mut Context<Self>) {
+        if self.probes.contains_key(&key) || self.probe_queue.contains(&key) {
+            return;
+        }
+        self.statuses.insert(key.clone(), AccountStatus::Queued);
+        self.probe_queue.push_back(key);
+        self.start_queued_probes(cx);
+        cx.notify();
+    }
+
+    fn start_queued_probes(&mut self, cx: &mut Context<Self>) {
+        while self.probes.len() < MAX_CONCURRENT_PROBES {
+            let Some(key) = self.probe_queue.pop_front() else {
+                return;
+            };
+            self.start_probe(key, cx);
+        }
+    }
+
+    fn start_probe(&mut self, key: AccountKey, cx: &mut Context<Self>) {
+        let Some(agent) = self.agents.get(&key).cloned() else {
+            self.statuses.insert(
+                key,
+                AccountStatus::Error("la cuenta no está registrada".into()),
+            );
+            return;
+        };
+        self.statuses.insert(key.clone(), AccountStatus::Checking);
+        let fs = self.fs.clone();
+        let project = self.project.clone();
+        let task = cx.spawn({
+            let key = key.clone();
+            async move |this, cx| {
+                let result = probe_account(agent, fs, project, cx).await;
+                this.update(cx, |view, cx| {
+                    view.probes.remove(&key);
+                    view.statuses.insert(key, AccountStatus::from_probe(result));
+                    view.start_queued_probes(cx);
+                    cx.notify();
+                })
+                .log_err();
+            }
+        });
+        self.probes.insert(key, task);
+    }
+
+    fn login(&mut self, key: AccountKey, window: &mut Window, cx: &mut Context<Self>) {
+        if self.logins.contains_key(&key) {
+            return;
+        }
+        let (Some(agent), Some(project)) = (self.agents.get(&key).cloned(), self.project.upgrade())
+        else {
+            return;
+        };
+        self.statuses.insert(key.clone(), AccountStatus::LoggingIn);
+        let workspace = self.workspace.clone();
+        let fs = self.fs.clone();
+        let task = cx.spawn_in(window, {
+            let key = key.clone();
+            async move |this, cx| {
+                let result = account_login::login(agent, project, workspace, fs, cx).await;
+                this.update(cx, |view, cx| {
+                    view.logins.remove(&key);
+                    match result {
+                        Ok(()) => view.check(key, cx),
+                        Err(error) => {
+                            view.statuses.insert(
+                                key,
+                                AccountStatus::Error(format!("inicio de sesión: {error:#}")),
+                            );
+                        }
+                    }
+                    cx.notify();
+                })
+                .log_err();
+            }
+        });
+        self.logins.insert(key, task);
         cx.notify();
     }
 
@@ -190,6 +420,7 @@ impl AccountsView {
                         view.file = Some(file);
                         view.draft = None;
                         view.notice = Some(notice);
+                        view.sync_agents(cx);
                     }
                     Err(error) => {
                         view.error = Some(format!("No se pudo guardar accounts.json: {error:#}"))
@@ -265,40 +496,125 @@ impl AccountsView {
             )
     }
 
-    fn render_provider(&self, provider: Provider, cx: &App) -> impl IntoElement {
-        let border = cx.theme().colors().border;
+    fn render_provider(&self, provider: Provider, cx: &mut Context<Self>) -> impl IntoElement {
         let mut column = v_flex()
             .gap_1()
             .child(Label::new(provider.label()).color(Color::Muted))
-            .child(account_row(
+            .child(self.render_account_row(
+                AccountKey {
+                    provider,
+                    account_id: None,
+                },
                 "Por defecto".into(),
                 default_folder(provider),
-                border,
+                cx,
             ));
         if let Some(document) = self.document() {
-            for account in document.accounts_for(provider) {
-                column = column.child(account_row(
-                    account.name.clone(),
-                    account.folder_name(),
-                    border,
-                ));
+            let accounts = document
+                .accounts_for(provider)
+                .map(|account| {
+                    (
+                        AccountKey {
+                            provider,
+                            account_id: Some(account.id.clone()),
+                        },
+                        account.name.clone(),
+                        account.folder_name(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            for (key, name, folder) in accounts {
+                column = column.child(self.render_account_row(key, name, folder, cx));
             }
         }
         column
     }
+
+    fn render_account_row(
+        &self,
+        key: AccountKey,
+        name: String,
+        folder: String,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let status = self.status(&key);
+        let is_registered = self.agents.get(&key).is_some();
+        let is_busy = status.is_busy();
+        let element_id = account_element_id(&key);
+        v_flex()
+            .p_2()
+            .gap_1()
+            .border_1()
+            .border_color(cx.theme().colors().border)
+            .child(Label::new(name))
+            .child(
+                Label::new(format!("Carpeta: {folder}"))
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
+            .child(
+                Label::new(status.label())
+                    .size(LabelSize::Small)
+                    .color(status.color()),
+            )
+            .when(is_registered, |row| {
+                row.child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new(format!("{element_id}-login"), "Iniciar sesión")
+                                .disabled(is_busy)
+                                .on_click(cx.listener({
+                                    let key = key.clone();
+                                    move |view, _, window, cx| view.login(key.clone(), window, cx)
+                                })),
+                        )
+                        .child(
+                            Button::new(format!("{element_id}-check"), "Comprobar")
+                                .disabled(is_busy)
+                                .on_click(cx.listener({
+                                    let key = key.clone();
+                                    move |view, _, _, cx| view.check(key.clone(), cx)
+                                })),
+                        ),
+                )
+            })
+    }
 }
 
-fn account_row(name: String, folder: String, border: gpui::Hsla) -> impl IntoElement {
-    v_flex()
-        .p_2()
-        .border_1()
-        .border_color(border)
-        .child(Label::new(name))
-        .child(
-            Label::new(format!("Carpeta: {folder} · Sin probar"))
-                .size(LabelSize::Small)
-                .color(Color::Muted),
-        )
+fn account_element_id(key: &AccountKey) -> String {
+    format!(
+        "account-{}-{}",
+        key.provider.slug(),
+        key.account_id.as_deref().unwrap_or("default")
+    )
+}
+
+/// A missing folder means the account never logged in; the adapter is not started then,
+/// because it writes into its folder as soon as it runs.
+async fn probe_account(
+    agent: AccountAgent,
+    fs: Arc<dyn Fs>,
+    project: WeakEntity<Project>,
+    cx: &mut AsyncApp,
+) -> Result<Option<AuthStatus>> {
+    if !fs.is_dir(&agent.folder).await {
+        return Ok(None);
+    }
+    let command = project
+        .update(cx, |project, cx| {
+            project.agent_server_store().update(cx, |store, cx| {
+                store.get_external_agent(&agent.agent_id).map(|server| {
+                    server.get_command(Vec::new(), HashMap::default(), &mut cx.to_async())
+                })
+            })
+        })?
+        .context("la cuenta no está registrada")?
+        .await?;
+    let executor = cx.background_executor().clone();
+    cx.background_spawn(auth_status::probe(command, executor))
+        .await
+        .map(Some)
 }
 
 fn import_notice(report: &ImportReport) -> String {
@@ -369,6 +685,9 @@ impl Render for AccountsView {
                         ))
                     },
                 );
+        }
+        if let Some(message) = self.agents_error.clone() {
+            content = content.child(Label::new(message).color(Color::Error));
         }
         if let Some(draft) = &self.draft {
             content = content.child(self.render_draft(draft, cx));

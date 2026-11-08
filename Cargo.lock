@@ -12069,7 +12069,11 @@ dependencies = [
 name = "office"
 version = "0.1.0"
 dependencies = [
+ "acp_thread",
+ "agent-client-protocol",
+ "agent_servers",
  "anyhow",
+ "collections",
  "db",
  "fs",
  "futures 0.3.34",
@@ -12079,6 +12083,9 @@ dependencies = [
  "project",
  "serde",
  "serde_json",
+ "settings",
+ "task",
+ "terminal_view",
  "time",
  "ui",
  "ui_input",
