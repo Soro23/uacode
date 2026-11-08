@@ -149,10 +149,10 @@ Prueba del 2026-11-08 en Windows 11, adaptador Claude 0.94.0.
 
 | Prueba | Resultado |
 | --- | --- |
-| Botón de login visible en Claude A / B / Codex A | OK en Claude A y B ("Claude Subscription"). Codex A pendiente |
+| Botón de login visible en Claude A / B / Codex A | OK ("Claude Subscription" en Claude; "ChatGPT" en Codex) |
 | Login Claude A guardado en `claude-default` | OK: cuenta personal |
 | Login Claude B guardado en `claude-b` | OK: `.credentials.json` y `.claude.json` en `claude-b`, cuenta de empresa; `~\.claude\.credentials.json` sin cambios |
-| Login Codex A guardado en `codex-default` (`auth.json`), `~/.codex` intacto | |
+| Login Codex A guardado en `codex-default` (`auth.json`), `~/.codex` intacto | OK: `codex-default\auth.json` creado a las 18:33:04; `~\.codex\auth.json` sin cambios desde las 18:28:18 (renovación de la app de escritorio de Codex). Misma cuenta en ambos, así que la prueba es por ubicación y hora, no por cuenta |
 | Claude A y B a la vez, cuentas distintas | OK |
 | Tareas simultáneas sin pisarse | OK: dos hilos en el mismo panel; cada uno creó su archivo (`prueba-B.txt` 18:49:28, `prueba-A.txt` 18:49:31) y siguió con una espera de 30 s, sin cruzarse respuestas |
 | Persistencia tras reiniciar | |
