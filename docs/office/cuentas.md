@@ -153,8 +153,8 @@ Prueba del 2026-11-08 en Windows 11, adaptador Claude 0.94.0.
 | Login Claude A guardado en `claude-default` | OK: cuenta personal |
 | Login Claude B guardado en `claude-b` | OK: `.credentials.json` y `.claude.json` en `claude-b`, cuenta de empresa; `~\.claude\.credentials.json` sin cambios |
 | Login Codex A guardado en `codex-default` (`auth.json`), `~/.codex` intacto | |
-| Claude A y B a la vez, cuentas distintas | |
-| Tareas simultáneas sin pisarse | |
+| Claude A y B a la vez, cuentas distintas | OK |
+| Tareas simultáneas sin pisarse | OK: dos hilos en el mismo panel; cada uno creó su archivo (`prueba-B.txt` 18:49:28, `prueba-A.txt` 18:49:31) y siguió con una espera de 30 s, sin cruzarse respuestas |
 | Persistencia tras reiniciar | |
 
 ## Problemas conocidos / a vigilar
@@ -164,6 +164,8 @@ Prueba del 2026-11-08 en Windows 11, adaptador Claude 0.94.0.
 - `npx.cmd` es obligatorio en Windows; `npx` es un script `.ps1`.
 - `env` no expande variables (`%APPDATA%`), hay que usar rutas absolutas.
 - Si un agente aparece como no registrado, revisar el nombre y que `"type": "custom"` esté presente.
+- Las entradas de registro `claude-acp` y `codex-acp` ("Claude Agent" y "Codex" en el menú) usan las cuentas por defecto (`~\.claude`, `~\.codex`); se quitaron de `agent_servers` para no abrir un agente con la cuenta equivocada.
+- La app de escritorio de Codex renueva el token de `~\.codex\auth.json` (cambia `last_refresh`, no la cuenta), así que su fecha o hash no sirven para probar que Codex A no lo tocó mientras esa app esté abierta.
 - Los métodos "Anthropic Console" (Claude) y "API Key" (Codex) usan facturación por API; no usarlos en esta prueba.
 - Camino 2 del login (formato `_meta["terminal-auth"]`): ignora el `env` del agente. Solo afectaría si un adaptador anuncia únicamente ese formato.
 
@@ -175,3 +177,6 @@ Gestor de cuentas dentro de la app:
 - **Estado por cuenta**: conectada, caducada o sin sesión, y cuál es la cuenta activa.
 - **Selección por agente**: cada agente elige su cuenta en un desplegable, con "Por defecto" como opción inicial. La app inyecta `CLAUDE_CONFIG_DIR` / `CODEX_HOME` y vacía las variables de API key, en lugar de pedir al usuario que edite `settings.json`.
 - Debe funcionar con agentes `custom` y de registro, y tratar igual los tres caminos de login de la tabla (incluido el que hoy pierde el `env`).
+- Mostrar la cuenta activa en el hilo: el agente ACP de Claude no tiene `/status`.
+
+Observado en la prueba, a valorar para Office: el panel de agentes muestra un solo hilo a la vez; para ver dos agentes lado a lado hay que abrir otra ventana.
