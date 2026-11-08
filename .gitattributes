@@ -3,3 +3,7 @@
 
 # Ensure the WSL script always has LF line endings, even on Windows
 crates/zed/resources/windows/zed.sh text eol=lf
+
+# UACode: keep Office files LF regardless of each machine's core.autocrlf
+crates/office/** text eol=lf
+docs/office/** text eol=lf
