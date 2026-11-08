@@ -866,7 +866,9 @@ fn ensure_agent_panel_for_workspace(
     });
 
     cx.spawn_in(window, async move |workspace, cx| {
-        office_task.await?;
+        if let Err(error) = office_task.await {
+            log::error!("Failed to initialize Office panel: {error:#}");
+        }
         task.await?;
         workspace.update_in(cx, |workspace, window, cx| {
             if let Some(source_workspace) = source_workspace.clone()

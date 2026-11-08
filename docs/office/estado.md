@@ -30,14 +30,14 @@ Actualizado: 2026-11-08.
 
 ## Siguiente paso
 
-Paso 1 terminado. Esperar confirmación para el paso 2: fichas persistentes con versionado y tests de serialización/errores. No avanzar sin visto bueno.
+Mensaje #2: paso 1 revisado y paso 2 autorizado. Implementar fichas persistentes con versionado y tests de serialización/errores. No avanzar sin visto bueno.
 
 ## Reglas de trabajo
 
 - Confirmar cada paso con el usuario antes de continuar; commits pequeños y claros en `office`.
 - Nunca hacer git push ni tocar remotos durante este desarrollo.
 - No escribir fuera del repositorio salvo en `%APPDATA%\UACode` cuando el paso lo requiera, avisando antes. No acceder a cuentas reales para pruebas sin el paso correspondiente.
-- Compilar y comprobar que arranca después de cada paso; ejecutar verificaciones pertinentes.
+- Ciclo de desarrollo debug incremental (`cargo build -p zed`), `cargo check -p office` y `cargo test -p office`; comprobar arranque tras cada paso. Release solo al cerrar hitos o por petición expresa. Registrar tiempos reales de debug.
 - Actualizar este archivo en cada paso con lo hecho, pendiente y decisiones nuevas.
 - AGENTS.md es un enlace simbólico a .rules, adaptado al fork: no añadir avisos de revisión upstream al README; seguir el protocolo del buzón.
 - Preferir codebase-memory-mcp para descubrir código. Usar `./script/clippy` si se necesita clippy.
@@ -59,3 +59,5 @@ Paso 1 terminado. Esperar confirmación para el paso 2: fichas persistentes con 
 - Limitación del panel mínimo: posición inicial derecha; el traslado no persiste su preferencia tras reiniciar.
 
 - 2026-11-08: completado el paso 1 de Fase 1 (panel vacío). Próximo paso sujeto a confirmación: puestos persistentes.
+
+- 2026-11-08, mensaje #2: aislado el error de carga de Office en zed.rs: se registra con log::error y no impide cargar AgentPanel. Paso 2 autorizado; pendiente prueba manual de disable_ai y persistencia de puestos.
