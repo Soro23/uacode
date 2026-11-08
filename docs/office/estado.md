@@ -9,7 +9,8 @@ Actualizado: 2026-11-08.
 - Fase 0 completada. `office-spike` contiene código desechable y no se fusiona.
 - Fase 1, paso 1: implementado el crate office con panel vacío, acción `office: toggle focus`, botón de dock y respeto de disable_ai. Compilación y arranque comprobados; apertura por paleta, cierre/reapertura por botón y traslado derecha → izquierda → derecha verificados visualmente.
 - Fase 1, paso 2: puestos persistentes en `.uacode/office.json` (commit `d0539a0d60`). Crear, editar y archivar puestos; JSON inválido o versión futura en solo lectura con «Abrir archivo» y «Recargar»; posición del dock persistida en la base de datos local.
-- Sin lógica de cuentas ni procesos ACP todavía.
+- Fase 1, paso 3: catálogo global de cuentas en `accounts.json` (commit `15beb0e1aa`). Alta con nombre único por proveedor, entradas virtuales «Por defecto», importación explícita de carpetas existentes y selector de cuenta en el puesto. Todas las cuentas «Sin probar».
+- Sin procesos ACP ni login desde Office todavía; añadir una cuenta no crea su carpeta.
 
 ## Decisiones vigentes
 
@@ -24,7 +25,8 @@ Actualizado: 2026-11-08.
 - Contexto en todos los puestos; USD solo Claude, etiquetado estimado. Concurrencia por número de agentes activos, con cola.
 - MCP HTTP en 127.0.0.1, puerto y token por sesión; validar Origin. Solo el orquestador recibe el endpoint; solo herramientas de Office se autoaprueban. Aprobaciones humanas de destructivos e integración se mantienen.
 - Merge local ejecutado por UACode mediante CLI de git tras aprobación; agente solo para conflictos.
-- Proyecto en `.uacode/office.json`; catálogo global en `%APPDATA%\UACode\office\accounts.json`; credenciales aisladas en `%APPDATA%\UACode\accounts\…`. Por defecto usa la cuenta habitual del proveedor.
+- Proyecto en `.uacode/office.json`; catálogo global en `%APPDATA%\UACode\office\accounts.json`; credenciales aisladas en `%APPDATA%\UACode\accounts\…`. «Por defecto» es virtual por proveedor y apunta a `accounts\claude-default` / `accounts\codex-default`.
+- Cuentas: id UUID, carpeta derivada del id (`<proveedor>-<8 caracteres>`) salvo las importadas, que guardan su carpeta. El puesto referencia la cuenta por id; si falta, «Sin cuenta» sin borrar la referencia. accounts.json nunca guarda tokens ni correos; Office no lee el contenido de las carpetas de credenciales.
 
 - office.json y accounts.json incluyen `version` desde el inicio; tests unitarios de serialización, JSON inválido y referencias inexistentes en pasos 2, 3 y 11.
 - Paso 4: evaluar registro dinámico en AgentServerStore; explicar inviabilidad antes de escribir settings.json. Paso 5: gancho mínimo aislado con test de hilos ajenos a Office. Pasos 7 y 8 pueden unirse si son pequeños.
@@ -33,7 +35,7 @@ Actualizado: 2026-11-08.
 
 ## Siguiente paso
 
-Paso 2 y ajustes 1–4 del mensaje #2 completados. Pendiente revisión y autorización del paso 3. No avanzar sin visto bueno.
+Paso 3 (mensaje #4) completado. Pendiente revisión y autorización del paso 4. No avanzar sin visto bueno.
 
 ## Reglas de trabajo
 
@@ -85,3 +87,15 @@ Paso 2 y ajustes 1–4 del mensaje #2 completados. Pendiente revisión y autoriz
 - Con la app debug, abrir una carpeta por argumento avisa de que falta `cli.exe` (solo afecta a askpass); no impide el arranque.
 
 - 2026-11-08, mensaje #3: los commits ya estaban en LF (`core.autocrlf=true` en el git de sistema normaliza al commitear; `git diff --stat --ignore-cr-at-eol` coincide con el normal). El CRLF solo estaba en la copia de trabajo y un git sin esa configuración lo ve como cambio de archivo completo. `.gitattributes` no tenía regla general; se añade `text eol=lf` solo para `crates/office/**` y `docs/office/**`, sin `* text=auto` global para no renormalizar archivos de upstream (hay uno con CRLF en el índice). Copias de trabajo de Office refrescadas a LF. Dependencias de `crates/office/Cargo.toml` ordenadas.
+
+## Verificación del paso 3
+
+- `cargo test -p office`: 19 tests (7 de office.json y 12 de cuentas: ida y vuelta, JSON inválido, versión futura, campos desconocidos como tokens, nombre duplicado, carpeta derivada del id, cuenta inexistente o de otro proveedor, cambio de proveedor, importación, carpetas reservadas o inseguras, archivo inexistente y edición externa). Clippy debug sin avisos. `cargo build -p zed` debug incremental: 48 s.
+- Prueba manual con `--user-data-dir target/office-step3-test/data` y carpetas vacías `claude-default`, `claude-b` y `codex-default`, sin escribir en `%APPDATA%`:
+  - Sin catálogo se ven las dos entradas «Por defecto».
+  - «Importar carpetas existentes» importó solo `claude-b`, con `"folder": "claude-b"`.
+  - Alta «Empresa»: carpeta derivada `claude-031a5164`, sin crear carpeta. «empresa» repetida: error claro.
+  - Selector del puesto: «Por defecto», `claude-b` y «Empresa» (solo Claude). Guardado con el id.
+  - Cuenta borrada a mano y «Recargar»: el puesto muestra «Sin cuenta» y conserva el id.
+  - Cambio de proveedor a Codex: la cuenta vuelve a «Por defecto».
+- Todavía no ha habido ninguna escritura real en `%APPDATA%\UACode\office`. La primera ocurrirá cuando el usuario añada o importe una cuenta en su UACode.

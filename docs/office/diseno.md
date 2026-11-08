@@ -30,9 +30,10 @@ Versiones revisadas: `agent-client-protocol` 5.0.0 (schema 1.15.1), `claude-agen
 | `office_panel.rs` | `OfficePanel` (implementa `workspace::Panel`), lista de tarjetas |
 | `post_card.rs` | Tarjeta de puesto (`RenderOnce`) |
 | `post_state.rs` | Cálculo del estado de un puesto a partir de `AcpThread` (funciones puras, con tests) |
-| `accounts.rs` | Modelo de cuentas, carpetas, estado de login |
-| `accounts_modal.rs` | Gestor de cuentas (modal) |
-| `office_store.rs` | Carga/guarda `office.json` y `accounts.json`, sincroniza `agent_servers` |
+| `accounts.rs` | Modelo y catálogo de cuentas (`accounts.json`), carpetas, importación, estado de login |
+| `accounts_view.rs` | Gestor de cuentas, sección del panel (sustituye al modal previsto) |
+| `versioned_file.rs` | Lectura/escritura atómica de JSON versionado, compartida por `office.json` y `accounts.json` |
+| `office_store.rs` | Modelo de `office.json` (puestos); más adelante sincroniza `agent_servers` |
 | `roles.rs` | Plantillas de rol (Fase 2) |
 | `policy.rs` | Permisos por rol y límite de concurrencia (Fase 1) |
 | `worktrees.rs` | Worktree por puesto, revisión y merge con el CLI de git (Fase 3) |
@@ -117,14 +118,16 @@ Se calcula en `post_state.rs` observando el `AcpThread` del puesto (`cx.subscrib
 
 Según los requisitos de cuentas.md:
 
-- **Añadir cuenta**: proveedor (Claude / Codex) + nombre. Crea `<config>/accounts/<proveedor>-<nombre>` (`paths::config_dir()`, en Windows `%APPDATA%\UACode\accounts\…`), registra el agente de esa cuenta (2.4) y abre un hilo con él para que salga el botón de login del adaptador (flujo ya probado).
+- **Añadir cuenta**: proveedor (Claude / Codex) + nombre, único por proveedor sin distinguir mayúsculas. La cuenta tiene id estable (UUID) y fecha de alta; su carpeta se deriva del id, `<config>/accounts/<proveedor>-<8 primeros caracteres del id>` (`paths::config_dir()`, en Windows `%APPDATA%\UACode\accounts\…`), para poder renombrar sin mover credenciales. En el paso 3 de la Fase 1 solo se registra en `accounts.json`; crear la carpeta, registrar el agente (2.4) y abrir el hilo de login llegan en pasos posteriores.
+- **Importar carpetas existentes**: acción explícita que lista los nombres de carpeta de `<config>/accounts` (sin leer su contenido) y crea entradas para las de prefijo `claude-`/`codex-` aún no referenciadas, con su carpeta explícita (campo opcional `folder`), sin moverlas ni renombrarlas. Omite las carpetas por defecto y las que chocan en nombre.
 - **Estado** de cada cuenta:
   - *Conectada*: el último intento de sesión con esa cuenta fue bien.
   - *Sin sesión / caducada*: el adaptador pidió autenticación.
   - *Sin probar*: no hay datos.
   - Identidad mostrada: Claude, `oauthAccount.emailAddress` de `<carpeta>/.claude.json`; Codex, correo del `id_token` de `<carpeta>/auth.json`. Solo se leen campos de identidad, nunca tokens, y no se registran en logs.
-- **Por defecto**: opción especial que no fija `CLAUDE_CONFIG_DIR`/`CODEX_HOME` (usa `~/.claude` o `~/.codex`).
-- **Selección por puesto**: desplegable de cuentas filtrado por el proveedor del puesto, con "Por defecto" como valor inicial.
+- **Por defecto**: entrada virtual por proveedor, no guardada en `accounts.json`, que apunta a `<config>/accounts/claude-default` o `codex-default` (mensaje #4; sustituye la idea anterior de usar `~/.claude`/`~/.codex`).
+- **Selección por puesto**: desplegable con "Por defecto" y las cuentas del proveedor del puesto. El puesto guarda el id (`account`, nulo = por defecto). Si el id no existe o es de otro proveedor, se muestra "Sin cuenta" sin borrar la referencia. Cambiar el proveedor del puesto vuelve a "Por defecto".
+- `accounts.json` nunca guarda tokens, correos ni credenciales; los campos desconocidos dejan el archivo en solo lectura.
 - **Borrar cuenta**: quita el registro; borrar la carpeta pide confirmación aparte.
 
 ### 2.4 Registro de agentes
@@ -140,7 +143,7 @@ Un agente por **(proveedor, cuenta)**, no por puesto: los puestos que comparten 
 
 | Archivo | Ámbito | Contenido | ¿Secretos? |
 | --- | --- | --- | --- |
-| `<config>/office/accounts.json` | Global (usuario) | Cuentas: id, proveedor, nombre, carpeta, último estado conocido | No (solo rutas) |
+| `<config>/office/accounts.json` | Global (usuario) | Cuentas: id, proveedor, nombre, fecha de alta, carpeta explícita solo si es importada | No (solo nombres de carpeta) |
 | `<proyecto>/.uacode/office.json` | Proyecto (se puede versionar) | Puestos del proyecto | No |
 | `<proyecto>/.uacode/office/roles/<rol>.md` | Proyecto | Instrucciones de cada rol | No |
 | `<config>/office/roles/<rol>.md` | Global | Plantillas por defecto de los roles | No |
