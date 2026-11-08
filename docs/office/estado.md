@@ -7,8 +7,8 @@ Actualizado: 2026-11-08.
 - Rama de desarrollo: `office`, basada en `rebrand`.
 - Rebranding y prueba de cuentas completados: login sin API keys, aislamiento, concurrencia y persistencia comprobados en Windows.
 - Fase 0 completada. `office-spike` contiene código desechable y no se fusiona.
-- Diseño actualizado con las decisiones aprobadas del spike. Fase 1 todavía sin implementar; no existe aún el panel Office.
-- Este cambio solo modifica documentación; no cambia el ejecutable ni requiere compilar o arrancar una nueva versión.
+- Fase 1, paso 1: implementado el crate office con panel vacío, acción `office: toggle focus`, botón de dock y respeto de disable_ai. Compilación y arranque comprobados; apertura por paleta, cierre/reapertura por botón y traslado derecha → izquierda → derecha verificados visualmente.
+- Sin lógica de cuentas, persistencia ni procesos ACP todavía. Posición inicial derecha; traslado entre docks en memoria, sin nuevos ajustes globales.
 
 ## Decisiones vigentes
 
@@ -30,16 +30,16 @@ Actualizado: 2026-11-08.
 
 ## Siguiente paso
 
-Plan aprobado mediante buzón (mensaje #1). Paso 1 autorizado: panel Office vacío acoplable que se abre y se cierra, para validar el enganche con Zed. No comenzar implementación sin visto bueno.
+Paso 1 terminado. Esperar confirmación para el paso 2: fichas persistentes con versionado y tests de serialización/errores. No avanzar sin visto bueno.
 
 ## Reglas de trabajo
 
 - Confirmar cada paso con el usuario antes de continuar; commits pequeños y claros en `office`.
 - Nunca hacer git push ni tocar remotos durante este desarrollo.
 - No escribir fuera del repositorio salvo en `%APPDATA%\UACode` cuando el paso lo requiera, avisando antes. No acceder a cuentas reales para pruebas sin el paso correspondiente.
-- Compilar y comprobar que arranca después de cada paso; ejecutar verificaciones pertinentes. En esta preparación documental solo se ha revisado el diff; no se ha compilado ni comprobado el arranque.
+- Compilar y comprobar que arranca después de cada paso; ejecutar verificaciones pertinentes.
 - Actualizar este archivo en cada paso con lo hecho, pendiente y decisiones nuevas.
-- AGENTS.md adaptado al fork: no añadir avisos de revisión upstream al README; seguir el protocolo del buzón.
+- AGENTS.md es un enlace simbólico a .rules, adaptado al fork: no añadir avisos de revisión upstream al README; seguir el protocolo del buzón.
 - Preferir codebase-memory-mcp para descubrir código. Usar `./script/clippy` si se necesita clippy.
 
 ## Historial
@@ -47,3 +47,15 @@ Plan aprobado mediante buzón (mensaje #1). Paso 1 autorizado: panel Office vac�
 - 2026-11-08: incorporadas al diseño las decisiones del spike y creado este estado inicial. Pendiente aprobación del plan e implementación del panel vacío.
 
 - 2026-11-08: recibido mensaje #1; plan y paso 1 aprobados con ajustes. AGENTS.md adaptado antes de implementar.
+
+## Verificación del paso 1
+
+- `cargo fmt -p office` y `git diff --check`: correctos.
+- Compilación correcta: `cargo rustc -p zed --bin uacode --release --offline -- -C opt-level=0` (LTO conservado; optimización reducida solo para el ejecutable de comprobación, sin cambios de configuración versionada). Log: `target/office-step1-build.log`.
+- El intento release normal se interrumpió por tiempo/recursos; el intento con LTO desactivado falló al enlazar dependencias release existentes (LNK1136/símbolos sin resolver). El reintento compatible terminó con avisos LNK4217 de Wasmtime, sin errores.
+- Prueba visual mediante computer-use: UACode arrancó, `office: toggle focus` apareció en la paleta, Office abrió vacío, cerró y reabrió desde el botón, y se movió entre docks. Queda abierto a la derecha.
+- `disable_ai` reutiliza el mismo helper y observador de ajustes del panel de agentes; su cambio dinámico no se probó manualmente en esta sesión.
+- No se añadieron avisos al README, ni se escribieron ajustes de cuentas, ni se hizo push ni se alteraron remotos.
+- Limitación del panel mínimo: posición inicial derecha; el traslado no persiste su preferencia tras reiniciar.
+
+- 2026-11-08: completado el paso 1 de Fase 1 (panel vacío). Próximo paso sujeto a confirmación: puestos persistentes.

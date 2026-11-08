@@ -12066,6 +12066,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "office"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gpui",
+ "log",
+ "ui",
+ "workspace",
+]
+
+[[package]]
 name = "ollama"
 version = "0.1.0"
 dependencies = [
@@ -22503,6 +22514,7 @@ dependencies = [
  "nix 0.30.1",
  "node_runtime",
  "notifications",
+ "office",
  "onboarding",
  "outline",
  "outline_panel",

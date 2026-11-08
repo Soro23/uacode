@@ -860,11 +860,13 @@ fn ensure_agent_panel_for_workspace(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) -> Task<anyhow::Result<()>> {
+    let office_task = setup_or_teardown_ai_panel(workspace, window, cx, office::OfficePanel::load);
     let task = setup_or_teardown_ai_panel(workspace, window, cx, move |workspace, cx| {
         agent_ui::AgentPanel::load(workspace, cx)
     });
 
     cx.spawn_in(window, async move |workspace, cx| {
+        office_task.await?;
         task.await?;
         workspace.update_in(cx, |workspace, window, cx| {
             if let Some(source_workspace) = source_workspace.clone()
