@@ -10,7 +10,7 @@ Actualizado: 2026-11-08.
 - Fase 1, paso 1: implementado el crate office con panel vacío, acción `office: toggle focus`, botón de dock y respeto de disable_ai. Compilación y arranque comprobados; apertura por paleta, cierre/reapertura por botón y traslado derecha → izquierda → derecha verificados visualmente.
 - Fase 1, paso 2: puestos persistentes en `.uacode/office.json` (commit `d0539a0d60`). Crear, editar y archivar puestos; JSON inválido o versión futura en solo lectura con «Abrir archivo» y «Recargar»; posición del dock persistida en la base de datos local.
 - Fase 1, paso 3: catálogo global de cuentas en `accounts.json` (commit `15beb0e1aa`). Alta con nombre único por proveedor, entradas virtuales «Por defecto», importación explícita de carpetas existentes y selector de cuenta en el puesto. Todas las cuentas «Sin probar».
-- Sin procesos ACP ni login desde Office todavía; añadir una cuenta no crea su carpeta.
+- Fase 1, paso 4: registro, login y comprobación de cuentas (commits `e5e8ca9371`, `9c1992fc03`, `040f12e913`). Un agente `office-<proveedor>-<id corto>` por cuenta, registrado dinámicamente sin escribir ajustes; «Iniciar sesión» crea la carpeta y lanza el login de suscripción; «Comprobar» sondea `_auth/status_update`. Pendiente: prueba de login real por el usuario.
 
 ## Decisiones vigentes
 
@@ -35,12 +35,9 @@ Actualizado: 2026-11-08.
 
 ## Siguiente paso
 
-Paso 4 (mensaje #5), Fase A de investigación entregada en el buzón. Pendiente visto bueno para la Fase B (implementación). No escribir código antes.
+Paso 4 implementado (mensajes #5 y #6). Pendiente: prueba de login real por el usuario con las instrucciones del buzón y su confirmación antes del paso 5.
 
-Resumen de la Fase A:
-- El registro dinámico es posible con la API pública, pero `reregister_agents` vacía el almacén en cada refresco del registro ACP y cierra las conexiones. Se propone un cambio aislado en `agent_server_store.rs` para conservar los agentes dinámicos.
-- Login: Claude 0.94.0 ofrece «Claude Subscription» como método terminal de primera clase y Codex 2.5.0 ofrece «ChatGPT» como método de agente; los dos conservan el env de la cuenta. El camino heredado `_meta terminal-auth` pierde el env, pero no se usa con estas versiones.
-- Estado e identidad: los dos adaptadores envían `_auth/status_update` (`kind` account/none y correo). UACode no lo procesa; se propone un sondeo propio de Office. `session/new` no detecta la falta de login en Claude. Los adaptadores escriben en su carpeta al arrancar, así que no se sondea si la carpeta no existe.
+Pendiente del paso 7: cambiar el modo o el modelo por defecto en un hilo de Office puede escribir una entrada `office-…` en `settings.json`. No se bloquea en el paso 4 (el prefijo reservado evita que rompa el agente); el bloqueo real llega cuando Office controle sus hilos.
 
 ## Reglas de trabajo
 
@@ -104,3 +101,14 @@ Resumen de la Fase A:
   - Cuenta borrada a mano y «Recargar»: el puesto muestra «Sin cuenta» y conserva el id.
   - Cambio de proveedor a Codex: la cuenta vuelve a «Por defecto».
 - Todavía no ha habido ninguna escritura real en `%APPDATA%\UACode\office`. La primera ocurrirá cuando el usuario añada o importe una cuenta en su UACode.
+
+- 2026-11-09, mensaje #6: Fase A aprobada con ajustes (prefijo `office-` reservado, arreglo del `_meta terminal-auth`, sondeo bajo demanda con máximo 2, correo y plan solo en memoria). Fase B implementada en tres commits aislados.
+
+## Verificación del paso 4
+
+- Tests: `project` 18 de `agent_server_store` (3 nuevos: el agente dinámico sobrevive a cambios de ajustes y refrescos del registro, unregister emite `AgentServersUpdated`, gana a una entrada `office-…` de ajustes); `agent_ui` 3 de `agent_connection_store` (1 nuevo: la conexión del agente dinámico sigue tras recargar ajustes y se descarta al darlo de baja); `agent_servers` 8 de terminal-auth (3 nuevos: el `_meta` hereda el env del agente con el suyo encima, y sin agente registrado no cambia); `office` 28 (nombres, comandos y env por cuenta con claves vacías; registrar no crea carpetas; lectura de `_auth/status_update`; el sondeo mata el árbol de procesos tras el plazo; carpeta derivada de un id inválido rechazada).
+- `cargo clippy -p office --all-targets -- --deny warnings` (debug) sin avisos. El repo prohíbe `smol::Timer`; el sondeo usa el timer del executor de GPUI.
+- Tiempos debug: tests de `project` 4 min 41 s (primera vez), `agent_servers` 5 min, `agent_ui` 14 min 19 s; `cargo test -p office` 3 min 58 s; `cargo build -p zed` incremental 42 s – 5 min 37 s.
+- Prueba manual con `--user-data-dir target/office-step4-test/data`: el panel muestra «Por defecto» de Claude y Codex con «Iniciar sesión» y «Comprobar». «Comprobar» en Claude sin carpeta: «Requiere login» al instante y la carpeta no se crea. En Codex con carpeta vacía: «Comprobando…» y luego «Requiere login» (sondeo real con codex-acp 2.5.0); después no queda ningún proceso `codex-acp`.
+- Incidencia: al traer la ventana al frente con computer-use se lanzó una segunda instancia debug sin argumentos (datos reales). Se cerró sin tocar nada; no se creó `%APPDATA%\UACode\office`.
+- No se ha hecho ningún login real ni se ha leído ningún archivo de credenciales.

@@ -31,9 +31,12 @@ Versiones revisadas: `agent-client-protocol` 5.0.0 (schema 1.15.1), `claude-agen
 | `post_card.rs` | Tarjeta de puesto (`RenderOnce`) |
 | `post_state.rs` | Cálculo del estado de un puesto a partir de `AcpThread` (funciones puras, con tests) |
 | `accounts.rs` | Modelo y catálogo de cuentas (`accounts.json`), carpetas, importación, estado de login |
-| `accounts_view.rs` | Gestor de cuentas, sección del panel (sustituye al modal previsto) |
+| `accounts_view.rs` | Gestor de cuentas, sección del panel (sustituye al modal previsto): estado, «Iniciar sesión», «Comprobar» y cola de sondeos |
+| `account_agents.rs` | Un agente por (proveedor, cuenta): id, nombre, comando y env; registro dinámico en `AgentServerStore` |
+| `account_login.rs` | Login de suscripción por la conexión ACP del agente de la cuenta |
+| `auth_status.rs` | Sondeo de estado con `_auth/status_update` (extensión interina, aislada aquí) |
 | `versioned_file.rs` | Lectura/escritura atómica de JSON versionado, compartida por `office.json` y `accounts.json` |
-| `office_store.rs` | Modelo de `office.json` (puestos); más adelante sincroniza `agent_servers` |
+| `office_store.rs` | Modelo de `office.json` (puestos) |
 | `roles.rs` | Plantillas de rol (Fase 2) |
 | `policy.rs` | Permisos por rol y límite de concurrencia (Fase 1) |
 | `worktrees.rs` | Worktree por puesto, revisión y merge con el CLI de git (Fase 3) |
@@ -64,6 +67,8 @@ Mínimos e imprescindibles:
 | 1 | `Cargo.toml`, `crates/zed/Cargo.toml` | Añadir el crate `office`. |
 | 1 | `crates/zed/src/main.rs` (~722) | `office::init(cx)` tras `agent_ui::init`. |
 | 1 | `crates/zed/src/zed.rs` (`initialize_panels`, ~778) | Cargar `OfficePanel` con `setup_or_teardown_ai_panel` para que desaparezca con `disable_ai`, igual que `AgentPanel`. `activation_priority` libre: 4 u 8+ (se usan 0-3 y 5-7; repetir una prioridad hace `panic` en debug). |
+| 1 | `crates/project/src/agent_server_store.rs` | Registro dinámico de agentes (`register_dynamic_agent` / `unregister_dynamic_agent`): sobreviven a `reregister_agents` y ganan a una entrada de ajustes con el mismo id (paso 4). |
+| 1 | `crates/agent_servers/src/acp/v1.rs` (`meta_terminal_auth_task`) | El login heredado por `_meta terminal-auth` hereda el env del comando del agente, con el env del `_meta` por encima (paso 4). |
 | 1 | `crates/acp_thread/src/acp_thread.rs` (peticiones de permiso, `fs/write_text_file`, `terminal/create`) | Gancho de política: antes de mostrar una petición de permiso o ejecutar una escritura/terminal, consultar una política registrable (aprobar, rechazar o pedir al usuario). Sin política registrada, comportamiento actual. Ver 2.7. |
 | 2 | `crates/acp_thread/src/connection.rs` | Opciones de sesión (`SessionOptions { system_prompt, extra_mcp_servers }`) en `new_session` / `load_session` / `resume_session`, con valor por defecto vacío para no romper a los demás implementadores. |
 | 2 | `crates/agent_servers/src/acp/v1.rs` (~1209) y `v2.rs` (~1296) | Poner `system_prompt` en `NewSessionRequest` (y load/resume) si el agente anuncia `sessionCapabilities.systemPrompt`; añadir `extra_mcp_servers` a los del proyecto (los usa la Fase 4). |
@@ -120,11 +125,14 @@ Según los requisitos de cuentas.md:
 
 - **Añadir cuenta**: proveedor (Claude / Codex) + nombre, único por proveedor sin distinguir mayúsculas. La cuenta tiene id estable (UUID) y fecha de alta; su carpeta se deriva del id, `<config>/accounts/<proveedor>-<8 primeros caracteres del id>` (`paths::config_dir()`, en Windows `%APPDATA%\UACode\accounts\…`), para poder renombrar sin mover credenciales. En el paso 3 de la Fase 1 solo se registra en `accounts.json`; crear la carpeta, registrar el agente (2.4) y abrir el hilo de login llegan en pasos posteriores.
 - **Importar carpetas existentes**: acción explícita que lista los nombres de carpeta de `<config>/accounts` (sin leer su contenido) y crea entradas para las de prefijo `claude-`/`codex-` aún no referenciadas, con su carpeta explícita (campo opcional `folder`), sin moverlas ni renombrarlas. Omite las carpetas por defecto y las que chocan en nombre.
-- **Estado** de cada cuenta:
-  - *Conectada*: el último intento de sesión con esa cuenta fue bien.
-  - *Sin sesión / caducada*: el adaptador pidió autenticación.
-  - *Sin probar*: no hay datos.
-  - Identidad mostrada: Claude, `oauthAccount.emailAddress` de `<carpeta>/.claude.json`; Codex, correo del `id_token` de `<carpeta>/auth.json`. Solo se leen campos de identidad, nunca tokens, y no se registran en logs.
+- **Iniciar sesión** (paso 4): crea la carpeta de la cuenta (solo aquí, nunca al añadirla), abre una conexión ACP con el agente de la cuenta y lanza su login de suscripción: Claude «Claude Subscription» (`claude-ai-login`, en una terminal del panel de terminal) y Codex «ChatGPT» (`chat-gpt`, petición `authenticate`; abre el navegador). Al terminar bien se comprueba el estado una vez.
+- **Estado** de cada cuenta, solo bajo demanda («Comprobar» o tras un login; nunca periódico ni al abrir el panel):
+  - *Sin probar*: no se ha comprobado en esta sesión de UACode.
+  - *Conectada*: el adaptador informa `kind: account`. Si informa otra credencial (clave de API, gateway…), *Conectada* con aviso de que no es la suscripción.
+  - *Requiere login*: informa `kind: none`, o la carpeta no existe (entonces no se arranca el adaptador, porque escribe en su carpeta al arrancar).
+  - *Error*: el adaptador no arranca, falla `initialize` o no informa a tiempo.
+  - Mecanismo: proceso de sondeo propio de Office que envía `initialize` y espera la notificación `_auth/status_update` (extensión interina de los dos adaptadores fijados, aislada en `auth_status.rs`). Plazo: 120 s hasta `initialize` (descarga de npx) y 20 s hasta el estado. Como mucho 2 sondeos a la vez; el resto en cola. El proceso se mata siempre al terminar, por plazo, al cerrar el panel o al salir (job object en Windows).
+  - Identidad mostrada: correo y plan de esa misma notificación, solo en memoria y en la interfaz de Office; nunca en `accounts.json`, logs ni mensajes de error. Office no lee archivos de credenciales.
 - **Por defecto**: entrada virtual por proveedor, no guardada en `accounts.json`, que apunta a `<config>/accounts/claude-default` o `codex-default` (mensaje #4; sustituye la idea anterior de usar `~/.claude`/`~/.codex`).
 - **Selección por puesto**: desplegable con "Por defecto" y las cuentas del proveedor del puesto. El puesto guarda el id (`account`, nulo = por defecto). Si el id no existe o es de otro proveedor, se muestra "Sin cuenta" sin borrar la referencia. Cambiar el proveedor del puesto vuelve a "Por defecto".
 - `accounts.json` nunca guarda tokens, correos ni credenciales; los campos desconocidos dejan el archivo en solo lectura.
@@ -134,10 +142,12 @@ Según los requisitos de cuentas.md:
 
 Un agente por **(proveedor, cuenta)**, no por puesto: los puestos que comparten cuenta comparten proceso y se distinguen por sesión (instrucciones de rol por sesión, Fase 2). Así doce puestos con dos cuentas son dos procesos, no doce.
 
-- Id del agente: `office-<proveedor>-<cuenta>` (por ejemplo `office-claude-empresa`).
-- En Fase 1 se evaluará primero registrar `office-*` dinámicamente en `AgentServerStore`, sin escribir ajustes. Si no es viable, se explicará el motivo al usuario antes de usar la alternativa persistente siguiente.
-- Alternativa persistente: Office escribe esas entradas `custom` en `agent_servers` de los ajustes globales con `update_settings_file` (mismo esquema que en cuentas.md: `npx.cmd`/`npx`, versión fijada, `CLAUDE_CONFIG_DIR`/`CODEX_HOME`, API keys vacías). Las entradas `office-*` las gestiona Office: se regeneran desde `accounts.json`.
-- Ventaja: cero cambios en `AgentServerStore`, y el mecanismo ya está probado. Inconveniente: aparecen también en el menú del panel de agentes. Alternativa futura: API de registro en memoria en `AgentServerStore` (hoy `reregister_agents` vacía el mapa en cada cambio de ajustes, habría que mantener un mapa aparte).
+- Id del agente: `office-<proveedor>-<8 primeros caracteres del id de la cuenta>` (por ejemplo `office-claude-031a5164`); las cuentas por defecto son `office-claude-default` y `office-codex-default`. Nombre visible: «Office · <Proveedor> · <cuenta>».
+- Registro dinámico en `AgentServerStore` (paso 4), sin escribir ajustes. `reregister_agents` reconstruye el mapa desde los ajustes en cada cambio y en cada refresco del registro ACP; los agentes dinámicos se apartan antes y se vuelven a insertar, así que su conexión activa no se descarta. El prefijo `office-` queda reservado: si `settings.json` tiene una entrada con ese id, gana el agente de Office y se registra un `log::warn`.
+- Comando: `npx.cmd` (Windows) o `npx` con `-y @agentclientprotocol/claude-agent-acp@0.94.0` o `@agentclientprotocol/codex-acp@2.5.0`. Env: el del proyecto, encima el de la petición (proxy, método de login) y, por último, `CLAUDE_CONFIG_DIR`/`CODEX_HOME` y `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, `OPEN_AI_API_KEY`, `CODEX_API_KEY` vacías, que nada puede sobrescribir.
+- Registrar no arranca procesos: el adaptador solo se lanza al iniciar sesión o comprobar. Al quitar una cuenta de `accounts.json` se da de baja su agente y se cancelan su sondeo y su login; al cerrar el panel o salir se dan de baja todos.
+- Solo proyectos locales: en remotos no se registran agentes.
+- Pendiente del paso 7: cambiar el modo o el modelo por defecto en un hilo de Office puede escribir una entrada `office-…` en `settings.json` (`CustomAgentServer` guarda ahí las preferencias de ids desconocidos). Con el prefijo reservado no rompe el agente de Office; el bloqueo real se hará cuando Office controle sus hilos.
 
 ### 2.5 Ficha de puesto y almacenamiento
 
