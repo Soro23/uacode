@@ -65,6 +65,8 @@ static CURRENT_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 /// On Windows, this is `%APPDATA%\Zed`.
 static CONFIG_DIR: OnceLock<PathBuf> = OnceLock::new();
 
+// TODO(uacode): rename `.zed_server`, `.zed_wsl_server` and `zed-remote-server*` together with
+// the remote server rebranding, which is deferred.
 /// Returns the relative path to the zed_server directory on the ssh host.
 pub fn remote_server_dir_relative() -> &'static RelPath {
     static CACHED: LazyLock<&'static RelPath> =
@@ -483,11 +485,23 @@ pub fn devcontainer_dir() -> &'static PathBuf {
     DEVCONTAINER_DIR.get_or_init(|| data_dir().join("devcontainer"))
 }
 
-// TODO(uacode): read `.uacode/` as the project folder, falling back to `.zed/`. Do it together
-// with the remote server rebranding (`.zed_server`, `zed-remote-server*`), which is deferred.
-/// Returns the relative path to a `.zed` folder within a project.
+/// Returns the name of the project folder that holds UACode's local settings.
 pub fn local_settings_folder_name() -> &'static str {
+    ".uacode"
+}
+
+/// Returns the name of the project folder inherited from Zed. Its files are read
+/// as a fallback when the project has no `.uacode` file of the same kind.
+pub fn legacy_local_settings_folder_name() -> &'static str {
     ".zed"
+}
+
+/// Returns every project folder name that can hold local settings, current one first.
+pub fn local_settings_folder_names() -> [&'static str; 2] {
+    [
+        local_settings_folder_name(),
+        legacy_local_settings_folder_name(),
+    ]
 }
 
 /// Returns the relative path to a `.vscode` folder within a project.
@@ -498,12 +512,26 @@ pub fn local_vscode_folder_name() -> &'static str {
 /// Returns the relative path to a `settings.json` file within a project.
 pub fn local_settings_file_relative_path() -> &'static RelPath {
     static CACHED: LazyLock<&'static RelPath> =
+        LazyLock::new(|| RelPath::from_unix_str(".uacode/settings.json").unwrap());
+    *CACHED
+}
+
+/// Returns the relative path to the Zed-compatible `.zed/settings.json` fallback.
+pub fn legacy_local_settings_file_relative_path() -> &'static RelPath {
+    static CACHED: LazyLock<&'static RelPath> =
         LazyLock::new(|| RelPath::from_unix_str(".zed/settings.json").unwrap());
     *CACHED
 }
 
 /// Returns the relative path to a `tasks.json` file within a project.
 pub fn local_tasks_file_relative_path() -> &'static RelPath {
+    static CACHED: LazyLock<&'static RelPath> =
+        LazyLock::new(|| RelPath::from_unix_str(".uacode/tasks.json").unwrap());
+    *CACHED
+}
+
+/// Returns the relative path to the Zed-compatible `.zed/tasks.json` fallback.
+pub fn legacy_local_tasks_file_relative_path() -> &'static RelPath {
     static CACHED: LazyLock<&'static RelPath> =
         LazyLock::new(|| RelPath::from_unix_str(".zed/tasks.json").unwrap());
     *CACHED
@@ -525,8 +553,15 @@ pub fn task_file_name() -> &'static str {
 }
 
 /// Returns the relative path to a `debug.json` file within a project.
-/// .zed/debug.json
+/// .uacode/debug.json
 pub fn local_debug_file_relative_path() -> &'static RelPath {
+    static CACHED: LazyLock<&'static RelPath> =
+        LazyLock::new(|| RelPath::from_unix_str(".uacode/debug.json").unwrap());
+    *CACHED
+}
+
+/// Returns the relative path to the Zed-compatible `.zed/debug.json` fallback.
+pub fn legacy_local_debug_file_relative_path() -> &'static RelPath {
     static CACHED: LazyLock<&'static RelPath> =
         LazyLock::new(|| RelPath::from_unix_str(".zed/debug.json").unwrap());
     *CACHED

@@ -2478,6 +2478,7 @@ fn open_project_settings_file(
     if let Some(task) = open_local_file(
         workspace,
         local_settings_file_relative_path(),
+        paths::legacy_local_settings_file_relative_path(),
         initial_project_settings_content(),
         window,
         cx,
@@ -2495,6 +2496,7 @@ fn open_project_tasks_file(
     if let Some(task) = open_local_file(
         workspace,
         local_tasks_file_relative_path(),
+        paths::legacy_local_tasks_file_relative_path(),
         initial_tasks_content(),
         window,
         cx,
@@ -2524,6 +2526,7 @@ fn open_worktree_setup_tasks_file(
     let Some(open_task) = open_local_file(
         workspace,
         local_tasks_file_relative_path(),
+        paths::legacy_local_tasks_file_relative_path(),
         settings::initial_worktree_setup_tasks_content(),
         window,
         cx,
@@ -2561,6 +2564,7 @@ fn open_project_debug_tasks_file(
     if let Some(task) = open_local_file(
         workspace,
         local_debug_file_relative_path(),
+        paths::legacy_local_debug_file_relative_path(),
         initial_local_debug_tasks_content(),
         window,
         cx,
@@ -2569,9 +2573,20 @@ fn open_project_debug_tasks_file(
     }
 }
 
+async fn is_existing_file(fs: &dyn fs::Fs, path: &std::path::Path) -> bool {
+    fs.metadata(path)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|metadata| !metadata.is_dir && !metadata.is_fifo)
+}
+
+/// Opens a project-local settings file. When only the Zed-compatible legacy file
+/// exists, that one is opened instead of creating a new file that would shadow it.
 fn open_local_file(
     workspace: &mut Workspace,
     settings_relative_path: &'static RelPath,
+    legacy_relative_path: &'static RelPath,
     initial_contents: Cow<'static, str>,
     window: &mut Window,
     cx: &mut Context<Workspace>,
@@ -2585,19 +2600,24 @@ fn open_local_file(
         let tree_id = worktree.read(cx).id();
         Some(cx.spawn_in(window, async move |workspace, cx| {
             // Check if the file actually exists on disk (even if it's excluded from worktree)
-            let file_exists = {
-                let full_path = worktree.read_with(cx, |tree, _| {
-                    tree.abs_path().join(settings_relative_path.as_std_path())
-                });
-
-                let fs = project.read_with(cx, |project, _| project.fs().clone());
-
-                fs.metadata(&full_path)
-                    .await
-                    .ok()
-                    .flatten()
-                    .is_some_and(|metadata| !metadata.is_dir && !metadata.is_fifo)
-            };
+            let fs = project.read_with(cx, |project, _| project.fs().clone());
+            let worktree_path = worktree.read_with(cx, |tree, _| tree.abs_path());
+            let mut settings_relative_path = settings_relative_path;
+            let mut file_exists = is_existing_file(
+                fs.as_ref(),
+                &worktree_path.join(settings_relative_path.as_std_path()),
+            )
+            .await;
+            if !file_exists
+                && is_existing_file(
+                    fs.as_ref(),
+                    &worktree_path.join(legacy_relative_path.as_std_path()),
+                )
+                .await
+            {
+                settings_relative_path = legacy_relative_path;
+                file_exists = true;
+            }
 
             if !file_exists {
                 if let Some(dir_path) = settings_relative_path.parent()

@@ -8,9 +8,11 @@ use git::repository::DEFAULT_WORKTREE_DIRECTORY;
 use gpui::{AsyncApp, BorrowAppContext, Context, Entity, EventEmitter, Subscription, Task};
 use lsp::{DEFAULT_LSP_REQUEST_TIMEOUT_SECS, LanguageServerName};
 use paths::{
-    EDITORCONFIG_NAME, debug_task_file_name, local_debug_file_relative_path,
-    local_settings_file_relative_path, local_tasks_file_relative_path,
-    local_vscode_launch_file_relative_path, local_vscode_tasks_file_relative_path, task_file_name,
+    EDITORCONFIG_NAME, debug_task_file_name, legacy_local_debug_file_relative_path,
+    legacy_local_settings_file_relative_path, legacy_local_tasks_file_relative_path,
+    local_debug_file_relative_path, local_settings_file_relative_path,
+    local_tasks_file_relative_path, local_vscode_launch_file_relative_path,
+    local_vscode_tasks_file_relative_path, task_file_name,
 };
 use rpc::{
     AnyProtoClient, TypedEnvelope,
@@ -935,6 +937,52 @@ pub struct SettingsObserver {
 /// and sends notifications downstream.
 /// In ssh mode it also monitors ~/.config/zed/{settings, task}.json and sends the content
 /// upstream.
+/// A `.uacode/` file shadows its Zed-compatible `.zed/` counterpart in the same directory.
+///
+/// Returns the path and change that should be applied for a filesystem change, or
+/// `None` when the change belongs to a `.zed/` file shadowed by a `.uacode/` one.
+/// When a `.uacode/` file is removed, the `.zed/` file takes over if it exists.
+fn resolve_local_settings_precedence(
+    worktree: &Worktree,
+    path: &Arc<RelPath>,
+    change: PathChange,
+) -> Option<(Arc<RelPath>, PathChange)> {
+    let file_pairs = [
+        (
+            local_settings_file_relative_path(),
+            legacy_local_settings_file_relative_path(),
+        ),
+        (
+            local_tasks_file_relative_path(),
+            legacy_local_tasks_file_relative_path(),
+        ),
+        (
+            local_debug_file_relative_path(),
+            legacy_local_debug_file_relative_path(),
+        ),
+    ];
+    let counterpart = |path: &RelPath, from: &RelPath, to: &RelPath| {
+        path.ancestors()
+            .nth(from.components().count())
+            .map(|directory| directory.join(to).as_rel_path().into_arc())
+    };
+
+    for (primary, legacy) in file_pairs {
+        if path.ends_with(legacy) {
+            let primary_path = counterpart(path, legacy, primary)?;
+            let is_shadowed = worktree.entry_for_path(&primary_path).is_some();
+            return (!is_shadowed).then(|| (path.clone(), change));
+        }
+        if path.ends_with(primary) && change == PathChange::Removed {
+            let legacy_path = counterpart(path, primary, legacy)?;
+            if worktree.entry_for_path(&legacy_path).is_some() {
+                return Some((legacy_path, PathChange::Loaded));
+            }
+        }
+    }
+    Some((path.clone(), change))
+}
+
 impl SettingsObserver {
     pub fn init(client: &AnyProtoClient) {
         client.add_entity_message_handler(Self::handle_update_worktree_settings);
@@ -1257,15 +1305,25 @@ impl SettingsObserver {
         };
 
         let mut settings_contents = Vec::new();
-        for (path, _, change) in changes.iter() {
-            let (settings_dir, kind) = if path.ends_with(local_settings_file_relative_path()) {
+        for (changed_path, _, changed_change) in changes.iter() {
+            let Some((path, change)) =
+                resolve_local_settings_precedence(worktree.read(cx), changed_path, *changed_change)
+            else {
+                continue;
+            };
+            let (path, change) = (&path, &change);
+            let (settings_dir, kind) = if path.ends_with(local_settings_file_relative_path())
+                || path.ends_with(legacy_local_settings_file_relative_path())
+            {
                 let settings_dir = path
                     .ancestors()
                     .nth(local_settings_file_relative_path().components().count())
                     .unwrap()
                     .into();
                 (settings_dir, LocalSettingsKind::Settings)
-            } else if path.ends_with(local_tasks_file_relative_path()) {
+            } else if path.ends_with(local_tasks_file_relative_path())
+                || path.ends_with(legacy_local_tasks_file_relative_path())
+            {
                 let settings_dir = path
                     .ancestors()
                     .nth(
@@ -1289,7 +1347,9 @@ impl SettingsObserver {
                     .unwrap()
                     .into();
                 (settings_dir, LocalSettingsKind::Tasks)
-            } else if path.ends_with(local_debug_file_relative_path()) {
+            } else if path.ends_with(local_debug_file_relative_path())
+                || path.ends_with(legacy_local_debug_file_relative_path())
+            {
                 let settings_dir = path
                     .ancestors()
                     .nth(
