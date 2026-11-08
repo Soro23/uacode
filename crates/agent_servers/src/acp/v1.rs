@@ -1301,6 +1301,43 @@ fn meta_terminal_auth_task(
     ))
 }
 
+/// UACode: the legacy `_meta` login command only carries its own env. Without the agent's
+/// env (e.g. CLAUDE_CONFIG_DIR) the login would silently store credentials in the default
+/// location instead of the account folder the agent runs with.
+fn with_agent_environment(
+    mut task: SpawnInTerminal,
+    agent_id: AgentId,
+    store: WeakEntity<AgentServerStore>,
+    cx: &App,
+) -> Task<Result<SpawnInTerminal>> {
+    cx.spawn(async move |cx| {
+        let command = store.update(cx, |store, cx| {
+            store
+                .get_external_agent(&agent_id)
+                .map(|agent| agent.get_command(Vec::new(), HashMap::default(), &mut cx.to_async()))
+        });
+        let command = match command {
+            Ok(Some(command)) => command.await?,
+            Ok(None) | Err(_) => {
+                log::debug!(
+                    "agent `{agent_id}` is not in the store; using the _meta login env only"
+                );
+                return Ok(task);
+            }
+        };
+        task.env = merge_login_environment(command.env.unwrap_or_default(), task.env);
+        Ok(task)
+    })
+}
+
+fn merge_login_environment(
+    mut agent_env: HashMap<String, String>,
+    login_env: HashMap<String, String>,
+) -> HashMap<String, String> {
+    agent_env.extend(login_env);
+    agent_env
+}
+
 impl AgentConnection for AcpConnection {
     fn agent_id(&self) -> AgentId {
         self.id.clone()
@@ -1603,7 +1640,14 @@ impl AgentConnection for AcpConnection {
                 cx,
             )),
             acp_v2::AuthMethod::Agent(_) => meta_terminal_auth_task(&self.id, method_id, method)
-                .map(|task| Task::ready(Ok(task))),
+                .map(|task| {
+                    with_agent_environment(
+                        task,
+                        self.id.clone(),
+                        self.agent_server_store.clone(),
+                        cx,
+                    )
+                }),
             _ => None,
         }
     }
@@ -5992,6 +6036,150 @@ mod tests {
         assert!(
             meta_terminal_auth_task(&AgentId::new("test-agent"), &method_id, &method).is_none()
         );
+    }
+
+    #[test]
+    fn legacy_terminal_auth_env_overrides_agent_env() {
+        let agent_env = HashMap::from_iter([
+            (
+                "CLAUDE_CONFIG_DIR".to_string(),
+                "/accounts/claude-a".to_string(),
+            ),
+            ("SHARED".to_string(), "agent".to_string()),
+        ]);
+        let login_env = HashMap::from_iter([
+            ("SHARED".to_string(), "login".to_string()),
+            ("AUTH_MODE".to_string(), "interactive".to_string()),
+        ]);
+
+        assert_eq!(
+            merge_login_environment(agent_env, login_env.clone()),
+            HashMap::from_iter([
+                (
+                    "CLAUDE_CONFIG_DIR".to_string(),
+                    "/accounts/claude-a".to_string()
+                ),
+                ("SHARED".to_string(), "login".to_string()),
+                ("AUTH_MODE".to_string(), "interactive".to_string()),
+            ])
+        );
+        assert_eq!(
+            merge_login_environment(HashMap::default(), login_env.clone()),
+            login_env,
+            "an agent without env keeps the _meta env unchanged"
+        );
+    }
+
+    struct EnvironmentTestAgent(HashMap<String, String>);
+
+    impl project::agent_server_store::ExternalAgentServer for EnvironmentTestAgent {
+        fn get_command(
+            &mut self,
+            extra_args: Vec<String>,
+            extra_env: HashMap<String, String>,
+            _cx: &mut AsyncApp,
+        ) -> Task<Result<AgentServerCommand>> {
+            let mut env = self.0.clone();
+            env.extend(extra_env);
+            Task::ready(Ok(AgentServerCommand {
+                path: "environment-test-agent".into(),
+                args: extra_args,
+                env: Some(env),
+            }))
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+    }
+
+    fn legacy_login_task() -> SpawnInTerminal {
+        acp_thread::build_terminal_auth_task(
+            "legacy-login".to_string(),
+            "Login".to_string(),
+            "legacy-agent".to_string(),
+            vec!["auth".to_string()],
+            HashMap::from_iter([("AUTH_MODE".to_string(), "interactive".to_string())]),
+        )
+    }
+
+    #[gpui::test]
+    async fn legacy_terminal_auth_inherits_agent_command_env(cx: &mut gpui::TestAppContext) {
+        init_settings_test(cx);
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree("/", serde_json::json!({ "a": {} })).await;
+        let project = project::Project::test(fs, [std::path::Path::new("/a")], cx).await;
+        let store = project.read_with(cx, |project, _| project.agent_server_store().clone());
+        let agent_id = AgentId::new("office-claude-test");
+        store.update(cx, |store, cx| {
+            store
+                .register_dynamic_agent(
+                    agent_id.clone(),
+                    project::agent_server_store::ExternalAgentEntry::new(
+                        Box::new(EnvironmentTestAgent(HashMap::from_iter([
+                            (
+                                "CLAUDE_CONFIG_DIR".to_string(),
+                                "/accounts/claude-a".to_string(),
+                            ),
+                            ("AUTH_MODE".to_string(), "agent".to_string()),
+                        ]))),
+                        project::agent_server_store::ExternalAgentSource::Custom,
+                        None,
+                        None,
+                    ),
+                    cx,
+                )
+                .expect("register test agent");
+        });
+
+        let task = cx
+            .update(|cx| {
+                with_agent_environment(legacy_login_task(), agent_id, store.downgrade(), cx)
+            })
+            .await
+            .expect("legacy login task");
+
+        assert_eq!(task.command.as_deref(), Some("legacy-agent"));
+        assert_eq!(
+            task.env,
+            HashMap::from_iter([
+                (
+                    "CLAUDE_CONFIG_DIR".to_string(),
+                    "/accounts/claude-a".to_string()
+                ),
+                ("AUTH_MODE".to_string(), "interactive".to_string()),
+            ])
+        );
+    }
+
+    #[gpui::test]
+    async fn legacy_terminal_auth_without_registered_agent_is_unchanged(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_settings_test(cx);
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree("/", serde_json::json!({ "a": {} })).await;
+        let project = project::Project::test(fs, [std::path::Path::new("/a")], cx).await;
+        let store = project.read_with(cx, |project, _| project.agent_server_store().downgrade());
+
+        let task = cx
+            .update(|cx| {
+                with_agent_environment(
+                    legacy_login_task(),
+                    AgentId::new("not-registered"),
+                    store,
+                    cx,
+                )
+            })
+            .await
+            .expect("legacy login task");
+
+        assert_eq!(task.env, legacy_login_task().env);
+        assert_eq!(task.args, vec!["auth"]);
     }
 
     #[test]
