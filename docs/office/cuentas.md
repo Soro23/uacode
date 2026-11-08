@@ -1,6 +1,6 @@
 # Varias cuentas por agente en UACode (fase de prueba)
 
-Estado: **configuración aplicada; login y verificación desde la interfaz pendientes** (ver "Resultados").
+Estado: **prueba superada el 2026-11-08** en Windows 11: tres agentes `custom` con login de cuenta hecho desde el panel de agentes, cada uno en su carpeta, en paralelo y con persistencia tras reiniciar (ver "Resultados").
 
 Objetivo: usar a la vez Claude Code (x2) y Codex vía ACP, cada uno con login de cuenta (no API key) y su propia carpeta de configuración, haciendo todo desde UACode.
 
@@ -155,7 +155,8 @@ Prueba del 2026-11-08 en Windows 11, adaptador Claude 0.94.0.
 | Login Codex A guardado en `codex-default` (`auth.json`), `~/.codex` intacto | OK: `codex-default\auth.json` creado a las 18:33:04; `~\.codex\auth.json` sin cambios desde las 18:28:18 (renovación de la app de escritorio de Codex). Misma cuenta en ambos, así que la prueba es por ubicación y hora, no por cuenta |
 | Claude A y B a la vez, cuentas distintas | OK |
 | Tareas simultáneas sin pisarse | OK: dos hilos en el mismo panel; cada uno creó su archivo (`prueba-B.txt` 18:49:28, `prueba-A.txt` 18:49:31) y siguió con una espera de 30 s, sin cruzarse respuestas |
-| Persistencia tras reiniciar | |
+| Sesiones guardadas en la carpeta de cada cuenta | OK: `claude-default\projects` (última sesión 18:50:26) y `claude-b\projects` (18:50:09) |
+| Persistencia tras reiniciar | OK: tras cerrar y abrir UACode, Claude A, Claude B y Codex A abren hilo sin pedir login |
 
 ## Problemas conocidos / a vigilar
 
