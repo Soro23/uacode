@@ -18,16 +18,19 @@ Actualizado: 2026-11-08.
 - Un proceso por (proveedor, cuenta), varias sesiones por proceso. Adaptadores fijados: Claude 0.94.0, Codex 2.5.0.
 - Roles con ACP `systemPrompt` append; modelo por puesto con `set_config_option` en Fase 2.
 - Tres cambios de cwd en Fase 3: respetar work_dirs explícitos, persistir/restaurar al reanudar, y respetarlos en fs/terminales del cliente ACP.
-- Codex siempre workspace-write con cwd en su worktree; pushurl inválido para todos los remotos de cada worktree; pre-push solo como aviso adicional. No alterar remotos del árbol principal.
+- Durante Fase 1, solo consulta: Codex read-only y Claude con aprobación obligatoria para cualquier escritura o comando. Desde Fase 3, Codex workspace-write con cwd en su worktree; pushurl inválido para todos los remotos de cada worktree; pre-push solo como aviso adicional. No alterar remotos del árbol principal.
 - Destructivos siempre con aprobación humana desde Office. Pendiente validar una vía efectiva para operaciones internas de Codex/Claude que no solicitan permiso ACP; bloquear tareas afectadas mientras no se garantice.
 - Contexto en todos los puestos; USD solo Claude, etiquetado estimado. Concurrencia por número de agentes activos, con cola.
 - MCP HTTP en 127.0.0.1, puerto y token por sesión; validar Origin. Solo el orquestador recibe el endpoint; solo herramientas de Office se autoaprueban. Aprobaciones humanas de destructivos e integración se mantienen.
 - Merge local ejecutado por UACode mediante CLI de git tras aprobación; agente solo para conflictos.
 - Proyecto en `.uacode/office.json`; catálogo global en `%APPDATA%\UACode\office\accounts.json`; credenciales aisladas en `%APPDATA%\UACode\accounts\…`. Por defecto usa la cuenta habitual del proveedor.
 
+- office.json y accounts.json incluyen `version` desde el inicio; tests unitarios de serialización, JSON inválido y referencias inexistentes en pasos 2, 3 y 11.
+- Paso 4: evaluar registro dinámico en AgentServerStore; explicar inviabilidad antes de escribir settings.json. Paso 5: gancho mínimo aislado con test de hilos ajenos a Office. Pasos 7 y 8 pueden unirse si son pequeños.
+
 ## Siguiente paso
 
-Presentar y aprobar el plan de Fase 1. Primer paso: panel Office vacío acoplable que se abre y se cierra, para validar el enganche con Zed. No comenzar implementación sin visto bueno.
+Plan aprobado mediante buzón (mensaje #1). Paso 1 autorizado: panel Office vacío acoplable que se abre y se cierra, para validar el enganche con Zed. No comenzar implementación sin visto bueno.
 
 ## Reglas de trabajo
 
@@ -36,9 +39,11 @@ Presentar y aprobar el plan de Fase 1. Primer paso: panel Office vacío acoplabl
 - No escribir fuera del repositorio salvo en `%APPDATA%\UACode` cuando el paso lo requiera, avisando antes. No acceder a cuentas reales para pruebas sin el paso correspondiente.
 - Compilar y comprobar que arranca después de cada paso; ejecutar verificaciones pertinentes. En esta preparación documental solo se ha revisado el diff; no se ha compilado ni comprobado el arranque.
 - Actualizar este archivo en cada paso con lo hecho, pendiente y decisiones nuevas.
-- Antes de modificar fuentes, anteponer al README.md las dos líneas obligatorias de revisión indicadas en AGENTS.md; nunca retirarlas automáticamente.
+- AGENTS.md adaptado al fork: no añadir avisos de revisión upstream al README; seguir el protocolo del buzón.
 - Preferir codebase-memory-mcp para descubrir código. Usar `./script/clippy` si se necesita clippy.
 
 ## Historial
 
 - 2026-11-08: incorporadas al diseño las decisiones del spike y creado este estado inicial. Pendiente aprobación del plan e implementación del panel vacío.
+
+- 2026-11-08: recibido mensaje #1; plan y paso 1 aprobados con ajustes. AGENTS.md adaptado antes de implementar.

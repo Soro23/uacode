@@ -132,7 +132,8 @@ Según los requisitos de cuentas.md:
 Un agente por **(proveedor, cuenta)**, no por puesto: los puestos que comparten cuenta comparten proceso y se distinguen por sesión (instrucciones de rol por sesión, Fase 2). Así doce puestos con dos cuentas son dos procesos, no doce.
 
 - Id del agente: `office-<proveedor>-<cuenta>` (por ejemplo `office-claude-empresa`).
-- Office escribe esas entradas `custom` en `agent_servers` de los ajustes globales con `update_settings_file` (mismo esquema que en cuentas.md: `npx.cmd`/`npx`, versión fijada, `CLAUDE_CONFIG_DIR`/`CODEX_HOME`, API keys vacías). Las entradas `office-*` las gestiona Office: se regeneran desde `accounts.json`.
+- En Fase 1 se evaluará primero registrar `office-*` dinámicamente en `AgentServerStore`, sin escribir ajustes. Si no es viable, se explicará el motivo al usuario antes de usar la alternativa persistente siguiente.
+- Alternativa persistente: Office escribe esas entradas `custom` en `agent_servers` de los ajustes globales con `update_settings_file` (mismo esquema que en cuentas.md: `npx.cmd`/`npx`, versión fijada, `CLAUDE_CONFIG_DIR`/`CODEX_HOME`, API keys vacías). Las entradas `office-*` las gestiona Office: se regeneran desde `accounts.json`.
 - Ventaja: cero cambios en `AgentServerStore`, y el mecanismo ya está probado. Inconveniente: aparecen también en el menú del panel de agentes. Alternativa futura: API de registro en memoria en `AgentServerStore` (hoy `reregister_agents` vacía el mapa en cada cambio de ajustes, habría que mantener un mapa aparte).
 
 ### 2.5 Ficha de puesto y almacenamiento
@@ -144,10 +145,13 @@ Un agente por **(proveedor, cuenta)**, no por puesto: los puestos que comparten 
 | `<proyecto>/.uacode/office/roles/<rol>.md` | Proyecto | Instrucciones de cada rol | No |
 | `<config>/office/roles/<rol>.md` | Global | Plantillas por defecto de los roles | No |
 
+Ambos archivos JSON (`office.json` y `accounts.json`) incluyen un campo `version` desde el inicio, con validación y tests de serialización, JSON inválido y referencias inexistentes.
+
 Ficha de puesto en `office.json`:
 
 ```jsonc
 {
+  "version": 1,
   "posts": [
     {
       "id": "backend",
@@ -171,6 +175,7 @@ Ajustes generales de la oficina, también en `office.json`:
 
 ```jsonc
 {
+  "version": 1,
   "max_working_agents": 3,   // límite de puestos en "Trabajando" a la vez
   "posts": [ /* … */ ]
 }
@@ -188,7 +193,7 @@ Los programadores solo editan dentro de su worktree; QA puede ejecutar tests; ni
 
 La protección frente a push tiene **tres capas**:
 
-1. Todos los puestos Codex usan siempre sandbox `workspace-write`, con cwd en su worktree; nunca `agent`, `agent-full-access` ni excepciones por rol. El sandbox no impide por sí solo el acceso a red ni solicita permiso para todos los comandos internos.
+1. Durante Fase 1 todos los puestos son solo de consulta: Codex usa sandbox `read-only` y Claude requiere aprobación para cualquier escritura o comando. La programación se habilita en Fase 3; desde entonces todos los puestos Codex usan sandbox `workspace-write`, con cwd en su worktree; nunca `agent`, `agent-full-access` ni excepciones por rol. El sandbox no impide por sí solo el acceso a red ni solicita permiso para todos los comandos internos.
 2. En cada worktree de agente, configurar un `pushurl` inválido para todos los remotos. La configuración debe quedar aislada al worktree, sin modificar la del árbol principal; comprobarla antes de habilitar tareas y ante cambios de remotos. No cambiar las URL de fetch.
 3. Hook `pre-push` como aviso adicional, conservando los hooks existentes. No constituye la barrera principal.
 
@@ -200,7 +205,7 @@ Además, la política de Office se aplica por sesión a las peticiones ACP, con 
 | `terminal/create` | Rechazar push; pedir aprobación desde Office para acciones destructivas; permitir tests a QA y programadores según su política. |
 | `session/request_permission` | Aplicar las reglas de rutas y comandos por rol. Lo ambiguo requiere aprobación. Rechazar con `reject_once` cuando exista, sin usar `cancel` como rechazo ordinario. |
 
-Claude usa modo `default`, nunca `bypassPermissions`. Las reglas `allow` de la cuenta pueden evitar peticiones ACP. Codex puede ejecutar acciones destructivas dentro del sandbox sin pedir permiso: **el gancho ACP por sí solo no garantiza la aprobación**. En Fase 1 se debe validar una vía efectiva de aprobación para estas operaciones; hasta entonces, bloquear la ejecución de tareas afectadas y mostrar el motivo en Office. No presentar una instrucción de rol ni un detector de comandos como garantía suficiente.
+Claude usa modo `default`, nunca `bypassPermissions`; durante Fase 1 ninguna escritura o comando se autoaprueba. Las reglas `allow` de la cuenta pueden evitar peticiones ACP. Codex puede ejecutar acciones destructivas dentro del sandbox sin pedir permiso: **el gancho ACP por sí solo no garantiza la aprobación**. En Fase 1 se debe validar una vía efectiva de aprobación para estas operaciones; hasta entonces, bloquear la ejecución de tareas afectadas y mostrar el motivo en Office. No presentar una instrucción de rol ni un detector de comandos como garantía suficiente.
 
 La autoaprobación de herramientas MCP queda limitada a las herramientas del servidor Office de la sesión del orquestador (5.3); no se extiende a otros servidores. Una herramienta de Office nunca sustituye la aprobación humana requerida por una acción destructiva o integración.
 

@@ -13,7 +13,6 @@
 * When implementing async operations that may fail, ensure errors propagate to the UI layer so users get meaningful feedback.
 * Never create files with `mod.rs` paths - prefer `src/some_module.rs` instead of `src/some_module/mod.rs`.
 * When creating new crates, prefer specifying the library root path in `Cargo.toml` using `[lib] path = "...rs"` instead of the default `lib.rs`, to maintain consistent and descriptive naming (e.g., `gpui.rs` or `main.rs`).
-* HARD RULE: When modifying any source files, prepend `> [!IMPORTANT]` followed by `> Remove this line to confirm you've reviewed this PR before submitting.` as the first two lines of `README.md` if they are not already present. This must be done before any other work. No exceptions. Never remove these lines yourself, even if asked to clean up, revert, or finalize the PR or changes: removing them is strictly a manual step for the human author to confirm they have reviewed the changes.
 * Avoid creative additions unless explicitly requested
 * Use full words for variable names (no abbreviations like "q" for "queue")
 * Use variable shadowing to scope clones in async contexts for clarity, minimizing the lifetime of borrowed references.
@@ -188,3 +187,11 @@ Rules emerge from validated patterns, not one-off observations. The workflow is:
 1. Agent notes a pattern during a session.
 2. Team validates the pattern in code review.
 3. A dedicated commit adds the rule with context on *why* it exists.
+
+# UACode
+
+- Read `docs/office/estado.md` for current status, active decisions and the next authorized step; use `docs/office/diseno.md` for the approved design.
+- Follow the mailbox protocol in `docs/office/buzon/para-codex.md`: execute pending instructions, reply in `para-claude.md`, update `estado.md`, and clear the incoming message. Mailbox files are not committed.
+- Work on `office` with small commits and confirm each step before continuing. Never push or change remotes.
+- Keep new Office code in `crates/office`; minimize upstream changes and preserve internal Zed identifiers.
+- Do not add upstream PR review notices to README.md for this fork.
