@@ -96,7 +96,13 @@ Versiones: Claude fijado en 0.94.0 (el del test e2e); en npm y en el registro AC
 1. Abrir el panel de agentes y elegir **Claude A** en el selector de agente. Al iniciar un hilo, si no hay sesión, aparece el aviso de autenticación con botones.
 2. Pulsar **Claude Subscription** (no "Anthropic Console"). Se abre una terminal dentro de UACode y el navegador para el OAuth; completar el login.
 3. Repetir con **Claude B** (otra cuenta) y con **Codex A**, donde se pulsa **ChatGPT** (no "API Key").
-4. Comprobar la cuenta activa: escribir `/status` en el hilo de cada Claude. En Codex, ver el punto 1 de la verificación.
+4. Comprobar la cuenta activa. `/status` **no existe** en el agente ACP de Claude (es de la TUI de Claude Code); se lee la cuenta guardada en cada carpeta, en la terminal integrada de UACode (muestra correo y organización, no tokens):
+
+   ```powershell
+   foreach ($name in "claude-default", "claude-b") { $file = "$env:APPDATA\UACode\accounts\$name\.claude.json"; if (Test-Path $file) { $account = (Get-Content $file -Raw | ConvertFrom-Json).oauthAccount; "{0}: {1} ({2})" -f $name, $account.emailAddress, $account.organizationName } else { "${name}: sin login" } }
+   ```
+
+   En Codex, ver el punto 1 de la verificación.
 
 ### Respaldo: login en la terminal integrada de UACode
 
@@ -133,19 +139,19 @@ $env:CODEX_HOME="$env:APPDATA\UACode\accounts\codex-default"; codex login status
    (Get-FileHash "$HOME\.codex\auth.json").Hash
    ```
 
-3. Abrir **Claude A** y **Claude B** a la vez; `/status` en cada uno debe mostrar cuentas distintas.
+3. Abrir **Claude A** y **Claude B** a la vez; el comando del paso 4 del login debe mostrar cuentas distintas.
 4. Lanzar una tarea en cada uno a la vez (por ejemplo "di tu cuenta y espera 30 s") y comprobar que cada sesión mantiene su historial. Las sesiones deben escribirse en `claude-default\projects` y `claude-b\projects` respectivamente.
 5. Cerrar y reabrir UACode, abrir de nuevo cada agente y confirmar que mantiene su cuenta.
 
 ## Resultados
 
-Pendiente de rellenar tras las pruebas.
+Prueba del 2026-11-08 en Windows 11, adaptador Claude 0.94.0.
 
 | Prueba | Resultado |
 | --- | --- |
-| Botón de login visible en Claude A / B / Codex A | |
-| Login Claude A guardado en `claude-default` | |
-| Login Claude B guardado en `claude-b` | |
+| Botón de login visible en Claude A / B / Codex A | OK en Claude A y B ("Claude Subscription"). Codex A pendiente |
+| Login Claude A guardado en `claude-default` | OK: cuenta personal |
+| Login Claude B guardado en `claude-b` | OK: `.credentials.json` y `.claude.json` en `claude-b`, cuenta de empresa; `~\.claude\.credentials.json` sin cambios |
 | Login Codex A guardado en `codex-default` (`auth.json`), `~/.codex` intacto | |
 | Claude A y B a la vez, cuentas distintas | |
 | Tareas simultáneas sin pisarse | |
@@ -153,7 +159,8 @@ Pendiente de rellenar tras las pruebas.
 
 ## Problemas conocidos / a vigilar
 
-- **Virtualización MSIX al configurar desde la app de Claude (Windows)**: la app de escritorio de Claude está empaquetada, y los procesos que lanza no escriben en el `%APPDATA%` real. Sus escrituras se desvían a `%LOCALAPPDATA%\Packages\Claude_<id>\LocalCache\Roaming\...`, y esos procesos leen la copia desviada como si fuera la real. UACode no ve esos cambios. Las carpetas y el `settings.json` hay que crearlos desde un proceso no empaquetado, por ejemplo la terminal integrada de UACode. El gestor de cuentas de la fase Office evitará el problema, porque lo hará la propia UACode.
+- **Virtualización MSIX al configurar desde la app de Claude (Windows)**: la app de escritorio de Claude está empaquetada, y los procesos que lanza no escriben en el `%APPDATA%` real. Sus escrituras se desvían a `%LOCALAPPDATA%\Packages\Claude_<id>\LocalCache\Roaming\...`, y esos procesos leen la copia desviada como si fuera la real. UACode no ve esos cambios. Las carpetas y el `settings.json` hay que crearlos desde un proceso no empaquetado, por ejemplo la terminal integrada de UACode. En la prueba se usó un script que inserta los tres agentes dentro del `agent_servers` existente (conservando `claude-acp` y `codex-acp` de registro) tras copiar `settings.json` a `settings.backup-<fecha>.json`.
+- **`disable_ai` en ajustes de proyecto**: un `.uacode/settings.json` con `"disable_ai": true` en el proyecto abierto oculta el panel de agentes y todos los comandos `agent:`, aunque el ajuste global diga `false`. El gestor de cuentas de la fase Office evitará el problema, porque lo hará la propia UACode.
 - `npx.cmd` es obligatorio en Windows; `npx` es un script `.ps1`.
 - `env` no expande variables (`%APPDATA%`), hay que usar rutas absolutas.
 - Si un agente aparece como no registrado, revisar el nombre y que `"type": "custom"` esté presente.
