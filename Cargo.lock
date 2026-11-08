@@ -12070,9 +12070,17 @@ name = "office"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "db",
+ "fs",
  "gpui",
  "log",
+ "project",
+ "serde",
+ "serde_json",
  "ui",
+ "ui_input",
+ "util",
+ "uuid",
  "workspace",
 ]
 

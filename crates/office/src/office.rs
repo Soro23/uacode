@@ -1,4 +1,5 @@
 mod office_panel;
+mod office_store;
 
 pub use office_panel::OfficePanel;
 
