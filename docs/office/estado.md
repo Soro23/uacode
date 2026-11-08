@@ -83,3 +83,5 @@ Paso 2 y ajustes 1–4 del mensaje #2 completados. Pendiente revisión y autoriz
   - disable_ai (en `.uacode/settings.json` del proyecto) activado y desactivado en caliente: el panel y su botón desaparecen y vuelven.
   - Dock movido a la izquierda, app reiniciada: se mantiene a la izquierda. Devuelto a la derecha.
 - Con la app debug, abrir una carpeta por argumento avisa de que falta `cli.exe` (solo afecta a askpass); no impide el arranque.
+
+- 2026-11-08, mensaje #3: los commits ya estaban en LF (`core.autocrlf=true` en el git de sistema normaliza al commitear; `git diff --stat --ignore-cr-at-eol` coincide con el normal). El CRLF solo estaba en la copia de trabajo y un git sin esa configuración lo ve como cambio de archivo completo. `.gitattributes` no tenía regla general; se añade `text eol=lf` solo para `crates/office/**` y `docs/office/**`, sin `* text=auto` global para no renormalizar archivos de upstream (hay uno con CRLF en el índice). Copias de trabajo de Office refrescadas a LF. Dependencias de `crates/office/Cargo.toml` ordenadas.
