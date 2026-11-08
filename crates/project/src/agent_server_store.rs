@@ -6,7 +6,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, bail};
-use collections::HashMap;
+use collections::{HashMap, HashSet};
 use fs::{Fs, RemoveOptions};
 use futures::StreamExt;
 use github_releases::AssetKind;
@@ -187,6 +187,10 @@ impl ExternalAgentEntry {
 pub struct AgentServerStore {
     state: AgentServerStoreState,
     pub external_agents: HashMap<AgentId, ExternalAgentEntry>,
+    // UACode: agents registered at runtime (Office accounts) instead of from settings.
+    // `reregister_agents` rebuilds `external_agents` from settings, so these ids are
+    // carried over; otherwise their entries, and their live connections, would be dropped.
+    dynamic_agent_ids: HashSet<AgentId>,
 }
 
 pub struct AgentServersUpdated;
@@ -297,7 +301,6 @@ impl AgentServerStore {
             node_runtime,
             fs,
             project_environment,
-            downstream_client,
             settings: old_settings,
             http_client,
             ..
@@ -346,6 +349,11 @@ impl AgentServerStore {
                 Option<watch::Sender<Option<String>>>,
             ),
         > = HashMap::default();
+        let dynamic_agents = self
+            .dynamic_agent_ids
+            .iter()
+            .filter_map(|id| self.external_agents.remove_entry(id))
+            .collect::<Vec<_>>();
         for (name, mut entry) in self.external_agents.drain() {
             if let Some(version) = entry.server.version().cloned() {
                 let new_version_available_tx = entry.server.take_new_version_available_tx();
@@ -445,6 +453,14 @@ impl AgentServerStore {
             }
         }
 
+        for (name, entry) in dynamic_agents {
+            if self.external_agents.insert(name.clone(), entry).is_some() {
+                log::warn!(
+                    "agent `{name}` from settings is ignored: the id is registered dynamically"
+                );
+            }
+        }
+
         // For each rebuilt versioned agent, compare the version. If it
         // changed, notify the active connection to reconnect. Otherwise,
         // transfer the channel to the new entry so future updates can use it.
@@ -474,7 +490,15 @@ impl AgentServerStore {
 
         *old_settings = Some(new_settings);
 
-        if let Some((project_id, downstream_client)) = downstream_client {
+        self.agents_changed(cx);
+    }
+
+    fn agents_changed(&mut self, cx: &mut Context<Self>) {
+        if let AgentServerStoreState::Local {
+            downstream_client: Some((project_id, downstream_client)),
+            ..
+        } = &self.state
+        {
             downstream_client
                 .send(proto::ExternalAgentsUpdated {
                     project_id: *project_id,
@@ -487,6 +511,38 @@ impl AgentServerStore {
                 .log_err();
         }
         cx.emit(AgentServersUpdated);
+    }
+
+    /// UACode: registers an agent that is not backed by settings. It survives settings
+    /// changes and registry refreshes, and wins over a settings entry with the same id.
+    pub fn register_dynamic_agent(
+        &mut self,
+        id: AgentId,
+        entry: ExternalAgentEntry,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        if !matches!(self.state, AgentServerStoreState::Local { .. }) {
+            bail!("dynamic agents are only supported in local projects");
+        }
+        if self.external_agents.insert(id.clone(), entry).is_some()
+            && !self.dynamic_agent_ids.contains(&id)
+        {
+            log::warn!("agent `{id}` from settings is ignored: the id is registered dynamically");
+        }
+        self.dynamic_agent_ids.insert(id);
+        self.agents_changed(cx);
+        Ok(())
+    }
+
+    /// UACode: removes an agent added with `register_dynamic_agent`. A settings entry
+    /// with the same id becomes visible again on the next settings reload.
+    pub fn unregister_dynamic_agent(&mut self, id: &AgentId, cx: &mut Context<Self>) -> bool {
+        if !self.dynamic_agent_ids.remove(id) {
+            return false;
+        }
+        self.external_agents.remove(id);
+        self.agents_changed(cx);
+        true
     }
 
     pub fn node_runtime(&self) -> Option<NodeRuntime> {
@@ -522,6 +578,7 @@ impl AgentServerStore {
                 _subscriptions: subscriptions,
             },
             external_agents: HashMap::default(),
+            dynamic_agent_ids: HashSet::default(),
         };
         this.agent_servers_settings_changed(cx);
         this
@@ -539,6 +596,7 @@ impl AgentServerStore {
                 worktree_store,
             },
             external_agents: HashMap::default(),
+            dynamic_agent_ids: HashSet::default(),
         }
     }
 
@@ -546,6 +604,7 @@ impl AgentServerStore {
         Self {
             state: AgentServerStoreState::Collab,
             external_agents: HashMap::default(),
+            dynamic_agent_ids: HashSet::default(),
         }
     }
 
@@ -2474,5 +2533,172 @@ mod tests {
                 "agent-b tx should have been transferred"
             );
         });
+    }
+
+    struct DynamicTestAgent;
+
+    impl ExternalAgentServer for DynamicTestAgent {
+        fn get_command(
+            &mut self,
+            extra_args: Vec<String>,
+            extra_env: HashMap<String, String>,
+            _cx: &mut AsyncApp,
+        ) -> Task<Result<AgentServerCommand>> {
+            Task::ready(Ok(AgentServerCommand {
+                path: "dynamic-agent".into(),
+                args: extra_args,
+                env: Some(extra_env),
+            }))
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+    }
+
+    fn register_dynamic_test_agent(
+        store: &gpui::Entity<AgentServerStore>,
+        id: &'static str,
+        cx: &mut TestAppContext,
+    ) {
+        store.update(cx, |store, cx| {
+            store
+                .register_dynamic_agent(
+                    AgentId::new(id),
+                    ExternalAgentEntry::new(
+                        Box::new(DynamicTestAgent),
+                        ExternalAgentSource::Custom,
+                        None,
+                        Some("Dynamic".into()),
+                    ),
+                    cx,
+                )
+                .expect("register dynamic agent");
+        });
+    }
+
+    fn is_dynamic_test_agent(
+        store: &gpui::Entity<AgentServerStore>,
+        id: &'static str,
+        cx: &mut TestAppContext,
+    ) -> bool {
+        store.read_with(cx, |store, _| {
+            store
+                .external_agents
+                .get(&AgentId::new(id))
+                .is_some_and(|entry| entry.server.as_any().is::<DynamicTestAgent>())
+        })
+    }
+
+    #[gpui::test]
+    fn test_dynamic_agent_survives_reregister(cx: &mut TestAppContext) {
+        init_test_settings(cx);
+        let registry = init_registry(cx, vec![make_npx_agent("test-agent", "1.0.0")]);
+        set_registry_settings(cx, &["test-agent"]);
+        let store = create_agent_server_store(cx);
+        register_dynamic_test_agent(&store, "office-claude-test", cx);
+
+        set_registry_settings(cx, &[]);
+        cx.run_until_parked();
+        assert!(is_dynamic_test_agent(&store, "office-claude-test", cx));
+        store.read_with(cx, |store, _| {
+            assert!(
+                !store
+                    .external_agents
+                    .contains_key(&AgentId::new("test-agent"))
+            );
+        });
+
+        set_registry_settings(cx, &["test-agent"]);
+        registry.update(cx, |registry, cx| {
+            registry.set_agents(vec![make_npx_agent("test-agent", "2.0.0")], cx);
+        });
+        cx.run_until_parked();
+        assert!(is_dynamic_test_agent(&store, "office-claude-test", cx));
+        store.read_with(cx, |store, _| {
+            assert!(
+                store
+                    .external_agents
+                    .contains_key(&AgentId::new("test-agent"))
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn test_unregister_dynamic_agent_emits_update(cx: &mut TestAppContext) {
+        init_test_settings(cx);
+        let store = create_agent_server_store(cx);
+        let updates = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let _subscription = cx.update(|cx| {
+            let updates = updates.clone();
+            cx.subscribe(&store, move |_, _: &AgentServersUpdated, _| {
+                updates.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })
+        });
+        register_dynamic_test_agent(&store, "office-codex-test", cx);
+        assert_eq!(updates.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let removed = store.update(cx, |store, cx| {
+            store.unregister_dynamic_agent(&AgentId::new("office-codex-test"), cx)
+        });
+        assert!(removed);
+        assert_eq!(updates.load(std::sync::atomic::Ordering::SeqCst), 2);
+        store.read_with(cx, |store, _| {
+            assert!(
+                !store
+                    .external_agents
+                    .contains_key(&AgentId::new("office-codex-test"))
+            );
+        });
+
+        let removed_again = store.update(cx, |store, cx| {
+            store.unregister_dynamic_agent(&AgentId::new("office-codex-test"), cx)
+        });
+        assert!(!removed_again);
+        assert_eq!(updates.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[gpui::test]
+    fn test_dynamic_agent_wins_over_settings_entry(cx: &mut TestAppContext) {
+        init_test_settings(cx);
+        let store = create_agent_server_store(cx);
+        let set_custom_settings = |command: &str, cx: &mut TestAppContext| {
+            let command = PathBuf::from(command);
+            cx.update(|cx| {
+                AllAgentServersSettings::override_global(
+                    AllAgentServersSettings(
+                        [(
+                            "office-claude-test".to_string(),
+                            settings::CustomAgentServerSettings::Custom {
+                                path: command,
+                                args: Vec::new(),
+                                env: HashMap::default(),
+                                default_mode: None,
+                                default_config_options: HashMap::default(),
+                                favorite_config_option_values: HashMap::default(),
+                            }
+                            .into(),
+                        )]
+                        .into_iter()
+                        .collect(),
+                    ),
+                    cx,
+                );
+            });
+        };
+        set_custom_settings("settings-agent", cx);
+        cx.run_until_parked();
+        assert!(!is_dynamic_test_agent(&store, "office-claude-test", cx));
+
+        register_dynamic_test_agent(&store, "office-claude-test", cx);
+        assert!(is_dynamic_test_agent(&store, "office-claude-test", cx));
+
+        set_custom_settings("other-settings-agent", cx);
+        cx.run_until_parked();
+        assert!(is_dynamic_test_agent(&store, "office-claude-test", cx));
     }
 }

@@ -557,4 +557,110 @@ mod tests {
         );
         assert_eq!(connection.shutdown_calls(), 1);
     }
+
+    struct DynamicTestAgent;
+
+    impl project::agent_server_store::ExternalAgentServer for DynamicTestAgent {
+        fn get_command(
+            &mut self,
+            extra_args: Vec<String>,
+            extra_env: HashMap<String, String>,
+            _cx: &mut gpui::AsyncApp,
+        ) -> Task<Result<project::agent_server_store::AgentServerCommand>> {
+            Task::ready(Ok(project::agent_server_store::AgentServerCommand {
+                path: "dynamic-agent".into(),
+                args: extra_args,
+                env: Some(extra_env),
+            }))
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+    }
+
+    #[gpui::test]
+    async fn test_dynamic_agent_connection_survives_agent_server_updates(cx: &mut TestAppContext) {
+        use project::agent_server_store::{
+            AllAgentServersSettings, ExternalAgentEntry, ExternalAgentSource,
+        };
+        use settings::Settings as _;
+
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/project", serde_json::json!({})).await;
+        let project = Project::test(fs, [Path::new("/project")], cx).await;
+        let agent_server_store =
+            project.read_with(cx, |project, _| project.agent_server_store().clone());
+        let agent_id = project::AgentId::new("office-claude-test");
+        agent_server_store.update(cx, |store, cx| {
+            store
+                .register_dynamic_agent(
+                    agent_id.clone(),
+                    ExternalAgentEntry::new(
+                        Box::new(DynamicTestAgent),
+                        ExternalAgentSource::Custom,
+                        None,
+                        None,
+                    ),
+                    cx,
+                )
+                .expect("register dynamic agent");
+        });
+
+        let store = cx.new(|cx| AgentConnectionStore::new(project.clone(), cx));
+        let connection = StubAgentConnection::new();
+        let key = Agent::Custom {
+            id: agent_id.clone(),
+        };
+        let entry = store.update(cx, |store, cx| {
+            store.request_connection(
+                key.clone(),
+                Rc::new(StubAgentServer::new(connection.clone())),
+                cx,
+            )
+        });
+        let _connected = entry
+            .read_with(cx, |entry, _| entry.wait_for_connection())
+            .await
+            .expect("connected");
+
+        cx.update(|cx| {
+            AllAgentServersSettings::override_global(
+                AllAgentServersSettings(HashMap::from_iter([(
+                    "other-agent".to_string(),
+                    settings::CustomAgentServerSettings::Custom {
+                        path: "other-agent".into(),
+                        args: Vec::new(),
+                        env: Default::default(),
+                        default_mode: None,
+                        default_config_options: Default::default(),
+                        favorite_config_option_values: Default::default(),
+                    }
+                    .into(),
+                )])),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        store.read_with(cx, |store, _| {
+            assert!(
+                store.entry(&key).is_some(),
+                "a settings reload must keep the dynamic agent's connection"
+            );
+        });
+        assert_eq!(connection.shutdown_calls(), 0);
+
+        agent_server_store.update(cx, |store, cx| {
+            store.unregister_dynamic_agent(&agent_id, cx);
+        });
+        cx.run_until_parked();
+        store.read_with(cx, |store, _| {
+            assert!(store.entry(&key).is_none());
+        });
+    }
 }
