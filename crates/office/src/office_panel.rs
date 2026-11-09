@@ -2,12 +2,24 @@ use crate::{
     accounts::AccountChoice,
     accounts_view::AccountsView,
     office_store::{self, OfficeFile, Post, Provider},
+    post_activity::{self, ThreadActivity},
     post_threads::PostThreads,
 };
+use acp_thread::AcpThread;
 use agent_ui::{
-    Agent, AgentPanel, AgentThreadSource, CreateThreadOptions, ThreadId,
+    Agent, AgentPanel, AgentPanelEvent, AgentThreadSource, CreateThreadOptions, ThreadId,
     thread_metadata_store::ThreadMetadataStore,
 };
+use std::time::Duration;
+
+/// Thread changes arrive on every streamed token; cards refresh at most this often.
+const ACTIVITY_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
+
+struct ThreadWatcher {
+    thread: WeakEntity<AcpThread>,
+    _subscription: Subscription,
+}
+use collections::HashMap;
 use db::kvp::KeyValueStore;
 use fs::Fs;
 use gpui::{
@@ -43,6 +55,10 @@ pub struct OfficePanel {
     fs: Arc<dyn Fs>,
     accounts: Entity<AccountsView>,
     post_threads: PostThreads,
+    activities: HashMap<String, ThreadActivity>,
+    thread_watchers: HashMap<String, ThreadWatcher>,
+    activity_refresh: Option<Task<()>>,
+    agent_panel_subscription: Option<Subscription>,
     focus_handle: FocusHandle,
     position: DockPosition,
     path: Option<PathBuf>,
@@ -97,6 +113,10 @@ impl OfficePanel {
                     fs,
                     accounts,
                     post_threads,
+                    activities: HashMap::default(),
+                    thread_watchers: HashMap::default(),
+                    activity_refresh: None,
+                    agent_panel_subscription: None,
                     focus_handle: cx.focus_handle(),
                     position,
                     path: None,
@@ -149,6 +169,7 @@ impl OfficePanel {
                         }
                     }
                     panel.load_post_threads(cx);
+                    panel.watch_post_threads(cx);
                     cx.notify();
                 })
                 .log_err();
@@ -277,7 +298,106 @@ impl OfficePanel {
         workspace.update(cx, |workspace, cx| {
             workspace.focus_panel::<AgentPanel>(window, cx);
         });
+        self.watch_post_threads(cx);
         cx.notify();
+    }
+
+    fn agent_panel(&self, cx: &App) -> Option<Entity<AgentPanel>> {
+        self.workspace.upgrade()?.read(cx).panel::<AgentPanel>(cx)
+    }
+
+    /// The agent panel loads after Office, so its events are followed once it exists.
+    fn ensure_agent_panel_subscription(&mut self, cx: &mut Context<Self>) {
+        if self.agent_panel_subscription.is_some() {
+            return;
+        }
+        let Some(agent_panel) = self.agent_panel(cx) else {
+            return;
+        };
+        self.agent_panel_subscription = Some(
+            cx.subscribe(&agent_panel, |panel, _, _: &AgentPanelEvent, cx| {
+                panel.watch_post_threads(cx)
+            }),
+        );
+        self.watch_post_threads(cx);
+    }
+
+    /// Follows the open thread of each post so its card shows what the agent is doing.
+    fn watch_post_threads(&mut self, cx: &mut Context<Self>) {
+        let Some(agent_panel) = self.agent_panel(cx) else {
+            return;
+        };
+        let post_ids = self
+            .file
+            .iter()
+            .flat_map(|file| file.document.posts.iter().map(|post| post.id.clone()))
+            .collect::<Vec<_>>();
+        let threads = post_ids
+            .into_iter()
+            .filter_map(|post_id| {
+                let thread_id = self.post_threads.thread(&post_id)?;
+                let thread = agent_panel.read(cx).agent_thread(thread_id, cx)?;
+                Some((post_id, thread))
+            })
+            .collect::<Vec<_>>();
+        self.set_watched_threads(threads, cx);
+    }
+
+    fn set_watched_threads(
+        &mut self,
+        threads: Vec<(String, Entity<AcpThread>)>,
+        cx: &mut Context<Self>,
+    ) {
+        let mut watchers = HashMap::default();
+        for (post_id, thread) in threads {
+            let watcher = match self.thread_watchers.remove(&post_id) {
+                Some(watcher) if watcher.thread == thread.downgrade() => watcher,
+                _ => ThreadWatcher {
+                    thread: thread.downgrade(),
+                    _subscription: cx.subscribe(&thread, |panel, _, _, cx| {
+                        panel.schedule_activity_refresh(cx)
+                    }),
+                },
+            };
+            watchers.insert(post_id, watcher);
+        }
+        self.thread_watchers = watchers;
+        self.refresh_activities(cx);
+    }
+
+    fn schedule_activity_refresh(&mut self, cx: &mut Context<Self>) {
+        if self.activity_refresh.is_some() {
+            return;
+        }
+        self.activity_refresh = Some(cx.spawn(async move |panel, cx| {
+            cx.background_executor()
+                .timer(ACTIVITY_REFRESH_INTERVAL)
+                .await;
+            panel
+                .update(cx, |panel, cx| {
+                    panel.activity_refresh = None;
+                    panel.refresh_activities(cx);
+                })
+                .log_err();
+        }));
+    }
+
+    fn refresh_activities(&mut self, cx: &mut Context<Self>) {
+        let activities = self
+            .thread_watchers
+            .iter()
+            .filter_map(|(post_id, watcher)| {
+                let thread = watcher.thread.upgrade()?;
+                Some((
+                    post_id.clone(),
+                    post_activity::thread_activity(thread.read(cx), cx),
+                ))
+            })
+            .collect::<HashMap<_, _>>();
+        if activities != self.activities {
+            self.activities = activities;
+            cx.notify();
+        }
     }
 
     /// Stops the response the post's thread is producing, if any.
@@ -402,6 +522,7 @@ impl OfficePanel {
                             panel.file = Some(file);
                             panel.draft = None;
                             panel.load_post_threads(cx);
+                            panel.watch_post_threads(cx);
                         }
                         Err(error) => panel.error = Some(format!("No se pudo guardar: {error:#}")),
                     }
@@ -494,6 +615,44 @@ impl OfficePanel {
                 );
         }
         state.into_any_element()
+    }
+
+    /// The post's state, current task and the agent's last message.
+    fn render_activity(&self, post: &Post, cx: &App) -> AnyElement {
+        let accounts = self.accounts.read(cx);
+        let (requires_login, account_error) = accounts.post_account_problem(post);
+        let activity = self.activities.get(&post.id);
+        let waiting_approval = !accounts.post_pending_approvals(&post.id).is_empty()
+            || activity.is_some_and(|activity| activity.waiting_approval);
+        let state = post_activity::post_state(
+            requires_login,
+            account_error.as_deref(),
+            waiting_approval,
+            activity,
+        );
+        v_flex()
+            .gap_1()
+            .child(Label::new(state.label()).color(state.color()).truncate())
+            .children(
+                activity
+                    .and_then(|activity| activity.task.clone())
+                    .map(|task| {
+                        Label::new(format!("Tarea: {task}"))
+                            .size(LabelSize::Small)
+                            .truncate()
+                    }),
+            )
+            .children(
+                activity
+                    .and_then(|activity| activity.last_message.clone())
+                    .map(|message| {
+                        Label::new(format!("Último mensaje: {message}"))
+                            .size(LabelSize::Small)
+                            .color(Color::Muted)
+                            .truncate()
+                    }),
+            )
+            .into_any_element()
     }
 
     fn account_label(&self, post: &Post, cx: &App) -> String {
@@ -648,6 +807,7 @@ impl Panel for OfficePanel {
 
 impl Render for OfficePanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_agent_panel_subscription(cx);
         let writable = self.writable();
         let warning = self.file.as_ref().and_then(|file| file.warning.clone());
         let posts = self
@@ -821,6 +981,7 @@ impl Render for OfficePanel {
                                 }
                             })),
                     )
+                    .children((!post.archived).then(|| self.render_activity(&post, cx)))
                     .children((!post.archived).then(|| self.render_policy_state(&post, cx)))
                     .child(Label::new(if post.model.is_empty() {
                         "Modelo: por defecto".into()
@@ -1141,6 +1302,81 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(pending_on_card(&panel, &cx), 0);
+    }
+
+    #[gpui::test]
+    async fn cards_show_state_and_last_message_with_limited_refresh(cx: &mut TestAppContext) {
+        let Fixture {
+            panel,
+            thread,
+            mut cx,
+        } = panel_with_linked_thread(cx).await;
+        panel.update_in(&mut cx, |panel, _, cx| {
+            panel.set_watched_threads(vec![(POST_ID.to_string(), thread.clone())], cx)
+        });
+        let activity = |cx: &VisualTestContext| {
+            panel.read_with(cx, |panel, _| panel.activities.get(POST_ID).cloned())
+        };
+        assert_eq!(activity(&cx).map(|activity| activity.working), Some(false));
+
+        thread.update(&mut cx, |thread, cx| {
+            thread
+                .handle_session_update(
+                    acp_v1::SessionUpdate::AgentMessageChunk(acp_v1::ContentChunk::new(
+                        "Primera línea
+He revisado notas.txt"
+                            .into(),
+                    )),
+                    cx,
+                )
+                .expect("message chunk")
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            activity(&cx).and_then(|activity| activity.last_message),
+            None,
+            "streamed text is not shown on every chunk"
+        );
+        cx.executor().advance_clock(ACTIVITY_REFRESH_INTERVAL);
+        cx.run_until_parked();
+        assert_eq!(
+            activity(&cx)
+                .and_then(|activity| activity.last_message)
+                .as_deref(),
+            Some("He revisado notas.txt")
+        );
+
+        let _outcome = request_read_permission(&thread, "read-1", &mut cx);
+        cx.executor().advance_clock(ACTIVITY_REFRESH_INTERVAL);
+        cx.run_until_parked();
+        panel.read_with(&cx, |panel, cx| {
+            let accounts = panel.accounts.read(cx);
+            let (requires_login, account_error) = accounts.post_account_problem(&office_post());
+            let activity = panel.activities.get(POST_ID);
+            assert_eq!(
+                post_activity::post_state(
+                    requires_login,
+                    account_error.as_deref(),
+                    !accounts.post_pending_approvals(POST_ID).is_empty(),
+                    activity,
+                ),
+                post_activity::PostState::WaitingApproval
+            );
+            assert!(activity.is_some_and(|activity| activity.waiting_approval));
+        });
+    }
+
+    fn office_post() -> Post {
+        Post {
+            id: POST_ID.into(),
+            name: "Consulta".into(),
+            role: "backend".into(),
+            provider: Provider::Claude,
+            account: None,
+            model: String::new(),
+            instructions: String::new(),
+            archived: false,
+        }
     }
 
     #[gpui::test]

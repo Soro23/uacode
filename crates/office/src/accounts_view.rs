@@ -203,6 +203,18 @@ impl AccountsView {
         Some(self.status(&key).label())
     }
 
+    /// Whether the post's account needs a login, and its last error, from the latest check.
+    pub fn post_account_problem(&self, post: &Post) -> (bool, Option<String>) {
+        let Some(key) = self.post_account_key(post) else {
+            return (false, None);
+        };
+        match self.status(&key) {
+            AccountStatus::RequiresLogin => (true, None),
+            AccountStatus::Error(error) => (false, Some(error.clone())),
+            _ => (false, None),
+        }
+    }
+
     /// The Office agent a post's threads run on, or `None` when its account is missing.
     pub fn post_agent_id(&self, post: &Post) -> Option<&AgentId> {
         let key = self.post_account_key(post)?;

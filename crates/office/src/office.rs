@@ -6,6 +6,7 @@ mod auth_status;
 mod office_panel;
 mod office_policy;
 mod office_store;
+mod post_activity;
 mod post_threads;
 mod versioned_file;
 
