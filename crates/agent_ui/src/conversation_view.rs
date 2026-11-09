@@ -1407,6 +1407,8 @@ impl ConversationView {
             else {
                 return;
             };
+            // A new session starts with the requested title; restored ones keep theirs.
+            let new_session_title = resume_session_id.is_none().then(|| title.clone()).flatten();
             let result = if let Some(session_id) = resume_session_id.clone() {
                 cx.update(|_, cx| {
                     if connection.supports_load_session() {
@@ -1467,6 +1469,11 @@ impl ConversationView {
             this.update_in(cx, |this, window, cx| {
                 match result {
                     Ok(thread) => {
+                        if let Some(title) = new_session_title {
+                            thread.update(cx, |thread, cx| {
+                                thread.set_title(title, cx).detach_and_log_err(cx);
+                            });
+                        }
                         if let Some(recovery) = &this.recovery {
                             thread.update(cx, |thread, cx| {
                                 thread.set_draft_prompt(Some(recovery.draft.clone()), cx);

@@ -4173,6 +4173,16 @@ impl AgentPanel {
         self.retained_threads.contains_key(id)
     }
 
+    /// The root thread of the conversation `thread_id`, when it is open in this panel.
+    pub fn agent_thread(&self, thread_id: ThreadId, cx: &App) -> Option<Entity<AcpThread>> {
+        self.active_conversation_view()
+            .into_iter()
+            .chain(self.draft_thread.iter())
+            .chain(self.retained_threads.values())
+            .find(|view| view.read(cx).thread_id == thread_id)
+            .and_then(|view| view.read(cx).root_thread(cx))
+    }
+
     pub fn cancel_thread(&self, thread_id: &ThreadId, cx: &mut Context<Self>) -> bool {
         let conversation_views = self
             .active_conversation_view()
@@ -14926,6 +14936,36 @@ mod tests {
                 Agent::Stub,
                 "selected_agent should be restored to the original after an agent override"
             );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_create_thread_with_options_applies_the_title(cx: &mut TestAppContext) {
+        let (panel, mut cx) = setup_panel(cx).await;
+        let _stub_connection =
+            crate::test_support::set_stub_agent_connection(StubAgentConnection::new());
+        panel.update(&mut cx, |panel, _cx| {
+            panel.selected_agent = Agent::Stub;
+        });
+
+        let thread_id = panel.update_in(&mut cx, |panel, window, cx| {
+            panel.create_thread_with_options(
+                CreateThreadOptions {
+                    title: Some("Consulta".into()),
+                    ..CreateThreadOptions::default()
+                },
+                AgentThreadSource::AgentPanel,
+                window,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+
+        panel.read_with(&cx, |panel, cx| {
+            let thread = panel
+                .agent_thread(thread_id, cx)
+                .expect("the new thread is open in the panel");
+            assert_eq!(thread.read(cx).title().as_deref(), Some("Consulta"));
         });
     }
 }
