@@ -87,7 +87,8 @@ pub struct AcpConnection {
     accepts_subagent_updates: bool,
     request_elicitations: Entity<ElicitationStore>,
     defaults: AcpConnectionDefaults,
-    _child: Option<transport::OwnedChild>,
+    /// Taken by `shutdown`, which kills the agent process and its children.
+    child: RefCell<Option<transport::OwnedChild>>,
     session_list: Option<Rc<AcpSessionList>>,
     debug_log: AcpDebugLog,
     _settings_subscription: Subscription,
@@ -750,7 +751,7 @@ impl AcpConnection {
             dispatch_tx,
             _wait_task: wait_task,
             _stderr_task: stderr_task,
-            _child: Some(child),
+            child: RefCell::new(Some(child)),
         })
     }
 
@@ -790,7 +791,7 @@ impl AcpConnection {
             accepts_subagent_updates,
             request_elicitations,
             defaults,
-            _child: None,
+            child: RefCell::new(None),
             session_list: None,
             debug_log: AcpDebugLog::default(),
             _settings_subscription: settings_subscription,
@@ -1366,6 +1367,12 @@ impl AgentConnection for AcpConnection {
 
     fn agent_version(&self) -> Option<SharedString> {
         self.agent_version.clone()
+    }
+
+    // Quitting only shuts connections down; without this the agent process outlived the
+    // app until it noticed its closed input and ran its own cleanup.
+    fn shutdown(&self) {
+        drop(self.child.borrow_mut().take());
     }
 
     fn new_session(
