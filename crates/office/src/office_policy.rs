@@ -3,7 +3,7 @@
 //! Phase 1 is read-only for every post and role. The rules are looked up per thread so that
 //! later phases can decide by post and role once Office links sessions to posts.
 
-use crate::office_store::Provider;
+use crate::{office_store::Provider, post_threads::PostThreads};
 use acp_thread::{
     AcpThread, PermissionRequestId, ToolCall,
     policy::{ModeChangeOrigin, PolicyContext, PolicyDecision, PolicyRequest, ThreadPolicy},
@@ -57,13 +57,14 @@ const CLAUDE_WRITE_AND_EXECUTE_TOOLS: [&str; 7] = [
 
 const PHASE_ONE: &str = "Office, Fase 1: solo consulta";
 
+/// What the panel shows on a post's card. Threads that belong to no post carry `None`.
 pub enum PolicyEvent {
     Denied {
-        agent_id: AgentId,
+        post_id: Option<String>,
         reason: SharedString,
     },
     Pending {
-        agent_id: AgentId,
+        post_id: Option<String>,
         thread: WeakEntity<AcpThread>,
         request: PermissionRequestId,
     },
@@ -71,12 +72,14 @@ pub enum PolicyEvent {
 
 /// What a post may do. In Phase 1 every post and role gets `consult_only`.
 struct PostRules {
+    post_id: Option<String>,
     allowed_modes: &'static [&'static str],
 }
 
 impl PostRules {
-    fn consult_only(provider: Provider) -> Self {
+    fn consult_only(provider: Provider, post_id: Option<String>) -> Self {
         Self {
+            post_id,
             allowed_modes: match provider {
                 Provider::Claude => &["default", "plan"],
                 Provider::Codex => &["read-only"],
@@ -87,17 +90,28 @@ impl PostRules {
 
 pub struct OfficePolicy {
     provider: Provider,
+    post_threads: PostThreads,
     events: UnboundedSender<PolicyEvent>,
 }
 
 impl OfficePolicy {
-    pub fn new(provider: Provider, events: UnboundedSender<PolicyEvent>) -> Self {
-        Self { provider, events }
+    pub fn new(
+        provider: Provider,
+        post_threads: PostThreads,
+        events: UnboundedSender<PolicyEvent>,
+    ) -> Self {
+        Self {
+            provider,
+            post_threads,
+            events,
+        }
     }
 
-    // Sessions are not linked to posts yet, so every thread gets the Phase 1 rules.
-    fn rules_for(&self, _context: &PolicyContext) -> PostRules {
-        PostRules::consult_only(self.provider)
+    /// The rules of the post the thread belongs to. Threads opened outside Office's posts
+    /// get the same Phase 1 rules.
+    fn rules_for(&self, context: &PolicyContext, cx: &App) -> PostRules {
+        let post_id = self.post_threads.post_for_session(context.session_id, cx);
+        PostRules::consult_only(self.provider, post_id)
     }
 
     fn version_problem(&self, agent_version: Option<&str>) -> Option<SharedString> {
@@ -116,11 +130,15 @@ impl OfficePolicy {
         )
     }
 
-    fn decision(&self, context: &PolicyContext, request: &PolicyRequest) -> PolicyDecision {
-        if let Some(reason) = self.version_problem(context.agent_version) {
+    fn decision(
+        &self,
+        rules: &PostRules,
+        agent_version: Option<&str>,
+        request: &PolicyRequest,
+    ) -> PolicyDecision {
+        if let Some(reason) = self.version_problem(agent_version) {
             return PolicyDecision::Deny { reason };
         }
-        let rules = self.rules_for(context);
         match request {
             PolicyRequest::SetMode { mode, .. } if rules.allowed_modes.contains(mode) => {
                 PolicyDecision::Allow
@@ -192,11 +210,12 @@ fn classify_permission(provider: Provider, kind: Option<&acp_v2::ToolKind>) -> P
 }
 
 impl ThreadPolicy for OfficePolicy {
-    fn decide(&self, context: &PolicyContext, request: &PolicyRequest, _: &App) -> PolicyDecision {
-        let decision = self.decision(context, request);
+    fn decide(&self, context: &PolicyContext, request: &PolicyRequest, cx: &App) -> PolicyDecision {
+        let rules = self.rules_for(context, cx);
+        let decision = self.decision(&rules, context.agent_version, request);
         if let PolicyDecision::Deny { reason } = &decision {
             self.send(PolicyEvent::Denied {
-                agent_id: context.agent_id.clone(),
+                post_id: rules.post_id,
                 reason: reason.clone(),
             });
         }
@@ -211,15 +230,12 @@ impl ThreadPolicy for OfficePolicy {
 
     fn start_session(
         &self,
-        agent_id: &AgentId,
+        _: &AgentId,
         agent_version: Option<&str>,
         _: &App,
     ) -> Result<Option<acp_v2::Meta>, SharedString> {
+        // The refusal shows in the thread that tried to start; no session exists yet.
         if let Some(reason) = self.version_problem(agent_version) {
-            self.send(PolicyEvent::Denied {
-                agent_id: agent_id.clone(),
-                reason: reason.clone(),
-            });
             return Err(reason);
         }
         Ok(self.session_meta())
@@ -230,10 +246,10 @@ impl ThreadPolicy for OfficePolicy {
         context: &PolicyContext,
         thread: WeakEntity<AcpThread>,
         request: PermissionRequestId,
-        _: &App,
+        cx: &App,
     ) {
         self.send(PolicyEvent::Pending {
-            agent_id: context.agent_id.clone(),
+            post_id: self.post_threads.post_for_session(context.session_id, cx),
             thread,
             request,
         });
@@ -248,21 +264,15 @@ mod tests {
 
     fn policy(provider: Provider) -> (OfficePolicy, mpsc::UnboundedReceiver<PolicyEvent>) {
         let (sender, receiver) = mpsc::unbounded();
-        (OfficePolicy::new(provider, sender), receiver)
+        (
+            OfficePolicy::new(provider, PostThreads::default(), sender),
+            receiver,
+        )
     }
 
     fn decide(policy: &OfficePolicy, version: &str, request: &PolicyRequest) -> PolicyDecision {
-        let agent_id = AgentId::new("office-claude-default");
-        let session_id = acp_v2::SessionId::new("session");
-        policy.decision(
-            &PolicyContext {
-                agent_id: &agent_id,
-                agent_version: Some(version),
-                session_id: &session_id,
-                parent_session_id: None,
-            },
-            request,
-        )
+        let rules = PostRules::consult_only(policy.provider, Some("backend".into()));
+        policy.decision(&rules, Some(version), request)
     }
 
     fn is_denied(decision: &PolicyDecision) -> bool {
@@ -388,7 +398,10 @@ mod tests {
         );
         cx.update(|cx| claude.start_session(&agent_id, None, cx))
             .expect_err("an unknown version is refused");
-        assert!(matches!(events.try_recv(), Ok(PolicyEvent::Denied { .. })));
+        assert!(
+            events.try_recv().is_err(),
+            "the refusal shows in the thread itself"
+        );
 
         // Even an otherwise allowed mode is denied on an unverified version.
         let decision = decide(
@@ -470,11 +483,8 @@ mod tests {
             )
         });
         match events.next().await {
-            Some(PolicyEvent::Denied {
-                agent_id: denied,
-                reason,
-            }) => {
-                assert_eq!(denied, agent_id);
+            Some(PolicyEvent::Denied { post_id, reason }) => {
+                assert_eq!(post_id, None, "the session belongs to no post");
                 assert!(reason.contains("acceptEdits"), "{reason}");
             }
             _ => panic!("expected a denial event"),

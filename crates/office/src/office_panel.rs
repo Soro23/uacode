@@ -2,6 +2,11 @@ use crate::{
     accounts::AccountChoice,
     accounts_view::AccountsView,
     office_store::{self, OfficeFile, Post, Provider},
+    post_threads::PostThreads,
+};
+use agent_ui::{
+    Agent, AgentPanel, AgentThreadSource, CreateThreadOptions, ThreadId,
+    thread_metadata_store::ThreadMetadataStore,
 };
 use db::kvp::KeyValueStore;
 use fs::Fs;
@@ -9,9 +14,12 @@ use gpui::{
     Action, App, AppContext, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle,
     Focusable, IntoElement, Pixels, Render, Styled, Subscription, Task, WeakEntity, Window, px,
 };
-use project::Project;
-use std::{path::PathBuf, sync::Arc};
-use ui::{ContextMenu, DropdownMenu, prelude::*};
+use project::{AgentId, Project};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+use ui::{ContextMenu, DropdownMenu, Tooltip, prelude::*};
 use ui_input::InputField;
 use util::ResultExt as _;
 use workspace::{
@@ -34,6 +42,7 @@ pub struct OfficePanel {
     project: Entity<Project>,
     fs: Arc<dyn Fs>,
     accounts: Entity<AccountsView>,
+    post_threads: PostThreads,
     focus_handle: FocusHandle,
     position: DockPosition,
     path: Option<PathBuf>,
@@ -77,13 +86,17 @@ impl OfficePanel {
                         panel.refresh(false, cx);
                     }
                 });
-                let accounts = cx.new(|cx| AccountsView::new(workspace.clone(), fs.clone(), cx));
+                let post_threads = PostThreads::default();
+                let accounts = cx.new(|cx| {
+                    AccountsView::new(workspace.clone(), fs.clone(), post_threads.clone(), cx)
+                });
                 let accounts_subscription = cx.observe(&accounts, |_, _, cx| cx.notify());
                 let mut panel = Self {
                     workspace,
                     project,
                     fs,
                     accounts,
+                    post_threads,
                     focus_handle: cx.focus_handle(),
                     position,
                     path: None,
@@ -135,12 +148,163 @@ impl OfficePanel {
                             panel.error = Some(format!("No se pudo leer office.json: {error:#}"))
                         }
                     }
+                    panel.load_post_threads(cx);
                     cx.notify();
                 })
                 .log_err();
             });
         }
         cx.notify();
+    }
+
+    /// Each post's thread is saved per project, keyed by the folder holding `office.json`.
+    fn load_post_threads(&self, cx: &App) {
+        let project_root = self
+            .path
+            .as_deref()
+            .and_then(Path::parent)
+            .and_then(Path::parent);
+        let post_ids = self
+            .file
+            .iter()
+            .flat_map(|file| file.document.posts.iter().map(|post| post.id.clone()))
+            .collect::<Vec<_>>();
+        self.post_threads.load(project_root, post_ids, cx);
+    }
+
+    /// The post's saved thread, when it still exists and runs on the post's current agent.
+    fn reusable_thread(
+        &self,
+        post: &Post,
+        agent_id: &AgentId,
+        agent_panel: &AgentPanel,
+        cx: &App,
+    ) -> Option<ThreadId> {
+        let thread_id = self.post_threads.thread(&post.id)?;
+        let saved_agent = ThreadMetadataStore::try_global(cx).and_then(|store| {
+            store
+                .read(cx)
+                .entry(thread_id)
+                .map(|metadata| metadata.agent_id.clone())
+        });
+        let reusable = match saved_agent {
+            // A post whose account changed starts a new thread on its new agent.
+            Some(saved_agent) => &saved_agent == agent_id,
+            // A thread with no saved metadata yet is only still reachable while in memory.
+            None => {
+                agent_panel.is_retained_thread(&thread_id)
+                    || agent_panel.active_thread_id(cx) == Some(thread_id)
+            }
+        };
+        reusable.then_some(thread_id)
+    }
+
+    /// Opens the post's thread in the agent panel, creating it when the post has none yet or
+    /// `new_thread` is set. A replaced thread stays in the agent panel's history.
+    fn open_post_thread(
+        &mut self,
+        post: &Post,
+        new_thread: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(agent_id) = self.accounts.read(cx).post_agent_id(post).cloned() else {
+            self.error = Some(format!("«{}» no tiene una cuenta disponible", post.name));
+            cx.notify();
+            return;
+        };
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let Some(agent_panel) = workspace.read(cx).panel::<AgentPanel>(cx) else {
+            self.error = Some("El panel de agentes no está disponible".into());
+            cx.notify();
+            return;
+        };
+        let existing = (!new_thread)
+            .then(|| self.reusable_thread(post, &agent_id, agent_panel.read(cx), cx))
+            .flatten();
+        let agent = Agent::Custom { id: agent_id };
+        let title = SharedString::from(post.name.clone());
+        let created = agent_panel.update(cx, |agent_panel, cx| match existing {
+            Some(thread_id) => {
+                agent_panel.load_agent_thread(
+                    agent,
+                    thread_id,
+                    None,
+                    Some(title),
+                    true,
+                    AgentThreadSource::AgentPanel,
+                    window,
+                    cx,
+                );
+                None
+            }
+            None => {
+                let thread_id = agent_panel.create_thread_with_options(
+                    CreateThreadOptions {
+                        title: Some(title),
+                        agent: Some(agent),
+                        ..Default::default()
+                    },
+                    AgentThreadSource::AgentPanel,
+                    window,
+                    cx,
+                );
+                agent_panel.activate_retained_thread(thread_id, true, window, cx);
+                Some(thread_id)
+            }
+        });
+        if let Some(thread_id) = created {
+            let save = self.post_threads.set(&post.id, thread_id, cx);
+            cx.spawn(async move |panel, cx| {
+                if let Err(error) = save.await {
+                    panel
+                        .update(cx, |panel, cx| {
+                            panel.error =
+                                Some(format!("No se pudo recordar el hilo del puesto: {error:#}"));
+                            cx.notify();
+                        })
+                        .log_err();
+                }
+            })
+            .detach();
+        }
+        workspace.update(cx, |workspace, cx| {
+            workspace.focus_panel::<AgentPanel>(window, cx);
+        });
+        cx.notify();
+    }
+
+    /// Stops the response the post's thread is producing, if any.
+    fn cancel_post_thread(&mut self, post: &Post, cx: &mut Context<Self>) {
+        let Some(thread_id) = self.post_threads.thread(&post.id) else {
+            return;
+        };
+        let Some(agent_panel) = self
+            .workspace
+            .upgrade()
+            .and_then(|workspace| workspace.read(cx).panel::<AgentPanel>(cx))
+        else {
+            return;
+        };
+        agent_panel.update(cx, |agent_panel, cx| {
+            agent_panel.cancel_thread(&thread_id, cx);
+        });
+    }
+
+    fn thread_label(&self, post: &Post, cx: &App) -> String {
+        let Some(thread_id) = self.post_threads.thread(&post.id) else {
+            return "Sin hilo".into();
+        };
+        ThreadMetadataStore::try_global(cx)
+            .and_then(|store| {
+                store
+                    .read(cx)
+                    .entry(thread_id)
+                    .map(|metadata| format!("Hilo: {}", metadata.display_title()))
+            })
+            .unwrap_or_else(|| "Hilo nuevo".into())
     }
 
     fn writable(&self) -> bool {
@@ -233,6 +397,7 @@ impl OfficePanel {
                         Ok(file) => {
                             panel.file = Some(file);
                             panel.draft = None;
+                            panel.load_post_threads(cx);
                         }
                         Err(error) => panel.error = Some(format!("No se pudo guardar: {error:#}")),
                     }
@@ -260,8 +425,8 @@ impl OfficePanel {
     /// Requests waiting for a person and the latest denial on the post's account.
     fn render_policy_state(&self, post: &Post, cx: &mut Context<Self>) -> AnyElement {
         let accounts = self.accounts.read(cx);
-        let approvals = accounts.post_pending_approvals(post);
-        let notice = accounts.post_policy_notice(post);
+        let approvals = accounts.post_pending_approvals(&post.id);
+        let notice = accounts.post_policy_notice(&post.id);
         let mut state = v_flex().gap_1();
         if !approvals.is_empty() {
             state = state.child(
@@ -297,7 +462,7 @@ impl OfficePanel {
                     );
         }
         if let Some(notice) = notice {
-            let dismissed = post.clone();
+            let dismissed = post.id.clone();
             state = state
                 .child(
                     Label::new(format!("Bloqueado: {notice}"))
@@ -601,13 +766,27 @@ impl Render for OfficePanel {
         {
             let id = post.id.clone();
             let edit = post.clone();
+            let opened = post.clone();
+            let renewed = post.clone();
+            let cancelled = post.clone();
             let account = self.account_label(&post, cx);
+            let thread = self.thread_label(&post, cx);
+            let has_thread = self.post_threads.thread(&post.id).is_some();
             content = content.child(
                 v_flex()
+                    .id(SharedString::from(format!("post-{}", post.id)))
                     .gap_1()
                     .p_2()
                     .border_1()
                     .border_color(cx.theme().colors().border)
+                    .when(!post.archived, |card| {
+                        card.cursor_pointer()
+                            .hover(|style| style.bg(cx.theme().colors().element_hover))
+                            .tooltip(Tooltip::text("Abrir el hilo del puesto"))
+                            .on_click(cx.listener(move |panel, _, window, cx| {
+                                panel.open_post_thread(&opened, false, window, cx)
+                            }))
+                    })
                     .child(Label::new(post.name.clone()))
                     .child(Label::new(format!(
                         "{} · {}",
@@ -618,8 +797,8 @@ impl Render for OfficePanel {
                         "Archivado".to_string()
                     } else {
                         match self.accounts.read(cx).post_status_label(&post) {
-                            Some(status) => format!("Sin hilo · Cuenta: {account} · {status}"),
-                            None => format!("Sin hilo · Cuenta: {account}"),
+                            Some(status) => format!("{thread} · Cuenta: {account} · {status}"),
+                            None => format!("{thread} · Cuenta: {account}"),
                         }
                     }))
                     .children((!post.archived).then(|| self.render_policy_state(&post, cx)))
@@ -631,6 +810,32 @@ impl Render for OfficePanel {
                     .child(
                         h_flex()
                             .gap_2()
+                            .when(!post.archived, |buttons| {
+                                buttons
+                                    .child(
+                                        Button::new(
+                                            SharedString::from(format!("new-thread-{}", post.id)),
+                                            "Nuevo hilo",
+                                        )
+                                        .on_click(
+                                            cx.listener(move |panel, _, window, cx| {
+                                                panel.open_post_thread(&renewed, true, window, cx)
+                                            }),
+                                        ),
+                                    )
+                                    .child(
+                                        Button::new(
+                                            SharedString::from(format!("cancel-{}", post.id)),
+                                            "Cancelar",
+                                        )
+                                        .disabled(!has_thread)
+                                        .on_click(
+                                            cx.listener(move |panel, _, _, cx| {
+                                                panel.cancel_post_thread(&cancelled, cx)
+                                            }),
+                                        ),
+                                    )
+                            })
                             .child(
                                 Button::new(
                                     SharedString::from(format!("edit-post-{}", post.id)),

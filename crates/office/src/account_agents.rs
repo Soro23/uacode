@@ -2,6 +2,7 @@ use crate::{
     accounts::{AccountsDocument, default_folder},
     office_policy::{self, OfficePolicy, PolicyEvent},
     office_store::Provider,
+    post_threads::PostThreads,
 };
 use acp_thread::policy::ThreadPolicies;
 use anyhow::{Context as _, Result};
@@ -182,6 +183,7 @@ impl RegisteredAgents {
         &mut self,
         agents: Vec<AccountAgent>,
         project: &Entity<Project>,
+        post_threads: &PostThreads,
         policy_events: &UnboundedSender<PolicyEvent>,
         cx: &mut App,
     ) -> Result<Vec<AccountAgent>> {
@@ -206,7 +208,11 @@ impl RegisteredAgents {
             }
             ThreadPolicies::register(
                 agent.agent_id.clone(),
-                Rc::new(OfficePolicy::new(agent.key.provider, policy_events.clone())),
+                Rc::new(OfficePolicy::new(
+                    agent.key.provider,
+                    post_threads.clone(),
+                    policy_events.clone(),
+                )),
                 cx,
             );
             register(&store, agent.clone(), project_environment.clone(), cx)?;
@@ -415,6 +421,7 @@ mod tests {
             registered.sync(
                 account_agents(&document, root),
                 &project,
+                &PostThreads::default(),
                 &policy_events,
                 cx,
             )
@@ -461,6 +468,7 @@ mod tests {
                 registered.sync(
                     account_agents(&document, root),
                     &project,
+                    &PostThreads::default(),
                     &policy_events,
                     cx,
                 )
