@@ -1,18 +1,20 @@
-//! UACode: policy hook for ACP threads.
+//! Policy hook for ACP threads.
 //!
 //! Lets an embedder (UACode Office) decide permission requests, client file writes, client
-//! terminals and session mode changes for the threads of one agent. Agents without a
-//! registered policy keep Zed's behavior unchanged: every hook returns `None` for them.
+//! terminals, session mode changes and session start for the threads of one agent. Agents
+//! without a registered policy keep the default behavior: every hook returns `None` for them.
 
-use crate::ToolCall;
+use crate::{AcpThread, PermissionRequestId, ToolCall};
 use agent_client_protocol::v2::schema as acp_v2;
 use collections::HashMap;
-use gpui::{App, Global, SharedString};
+use gpui::{App, Global, SharedString, WeakEntity};
 use project::AgentId;
 use std::{path::Path, rc::Rc};
 
 pub struct PolicyContext<'a> {
     pub agent_id: &'a AgentId,
+    /// The version the agent reported in `initialize`, if any.
+    pub agent_version: Option<&'a str>,
     pub session_id: &'a acp_v2::SessionId,
     pub parent_session_id: Option<&'a acp_v2::SessionId>,
 }
@@ -74,11 +76,28 @@ impl PolicyDecision {
 pub trait ThreadPolicy: 'static {
     fn decide(&self, context: &PolicyContext, request: &PolicyRequest, cx: &App) -> PolicyDecision;
 
-    /// `_meta` for `session/new`, `session/load` and `session/resume`. Agents read
-    /// launch options from it (for example `claudeCode.options`), which must be repeated
-    /// whenever the agent restores a session.
-    fn new_session_meta(&self, _agent_id: &AgentId, _cx: &App) -> Option<acp_v2::Meta> {
-        None
+    /// Runs before `session/new`, `session/load` and `session/resume`. An error refuses the
+    /// session with that reason. `Ok(Some(meta))` is sent as the request's `_meta`: agents
+    /// read launch options from it (for example `claudeCode.options`), and they must be
+    /// repeated whenever the agent restores a session.
+    fn start_session(
+        &self,
+        _agent_id: &AgentId,
+        _agent_version: Option<&str>,
+        _cx: &App,
+    ) -> Result<Option<acp_v2::Meta>, SharedString> {
+        Ok(None)
+    }
+
+    /// A request this policy left to the user is waiting in `thread`. Lets the embedder show
+    /// it elsewhere and answer it with [`AcpThread::answer_permission_request`].
+    fn permission_pending(
+        &self,
+        _context: &PolicyContext,
+        _thread: WeakEntity<AcpThread>,
+        _request: PermissionRequestId,
+        _cx: &App,
+    ) {
     }
 }
 
@@ -117,8 +136,15 @@ impl ThreadPolicies {
         Some(policy.decide(context, request, cx))
     }
 
-    pub fn new_session_meta(agent_id: &AgentId, cx: &App) -> Option<acp_v2::Meta> {
-        Self::for_agent(agent_id, cx)?.new_session_meta(agent_id, cx)
+    pub fn start_session(
+        agent_id: &AgentId,
+        agent_version: Option<&str>,
+        cx: &App,
+    ) -> Result<Option<acp_v2::Meta>, SharedString> {
+        match Self::for_agent(agent_id, cx) {
+            Some(policy) => policy.start_session(agent_id, agent_version, cx),
+            None => Ok(None),
+        }
     }
 }
 
@@ -439,6 +465,55 @@ mod tests {
             assert_eq!(titles.len(), 2);
             assert!(titles[1].starts_with("Turno detenido"), "{titles:?}");
         });
+    }
+
+    #[derive(Default)]
+    struct RecordingPolicy {
+        pending: RefCell<Vec<(Option<String>, PermissionRequestId)>>,
+    }
+
+    impl ThreadPolicy for RecordingPolicy {
+        fn decide(&self, _: &PolicyContext, _: &PolicyRequest, _: &App) -> PolicyDecision {
+            PolicyDecision::AskUser
+        }
+
+        fn permission_pending(
+            &self,
+            context: &PolicyContext,
+            _thread: WeakEntity<AcpThread>,
+            request: PermissionRequestId,
+            _: &App,
+        ) {
+            self.pending
+                .borrow_mut()
+                .push((context.agent_version.map(ToString::to_string), request));
+        }
+    }
+
+    #[gpui::test]
+    async fn pending_requests_can_be_answered_outside_the_thread(cx: &mut TestAppContext) {
+        let (thread, _, _) = new_thread(OFFICE_AGENT, cx).await;
+        let policy = Rc::new(RecordingPolicy::default());
+        cx.update(|cx| ThreadPolicies::register(AgentId::new(OFFICE_AGENT), policy.clone(), cx));
+
+        let approved = request_edit_permission(&thread, cx);
+        let (_, request) = policy.pending.borrow()[0];
+        let title = thread.read_with(cx, |thread, cx| {
+            thread.permission_request_title(request, cx)
+        });
+        assert_eq!(title.as_deref(), Some("Edit"));
+        thread.update(cx, |thread, cx| {
+            thread.answer_permission_request(request, true, cx)
+        });
+        assert_eq!(selected_option(approved.await), "once");
+
+        let rejected = request_edit_permission(&thread, cx);
+        let (_, request) = policy.pending.borrow()[1];
+        thread.update(cx, |thread, cx| {
+            thread.answer_permission_request(request, false, cx)
+        });
+        assert_eq!(selected_option(rejected.await), "reject");
+        assert_eq!(policy.pending.borrow().len(), 2);
     }
 
     #[test]

@@ -6807,8 +6807,9 @@ impl AcpThread {
         );
         let (id, task) =
             self.install_generic_permission_request(request, policy_answer.is_none(), cx);
-        if let Some(answer) = policy_answer {
-            self.apply_policy_permission_answer(id, answer, cx);
+        match policy_answer {
+            Some(answer) => self.apply_policy_permission_answer(id, answer, cx),
+            None => self.notify_policy_pending(id, cx),
         }
         Ok((id, task))
     }
@@ -6853,15 +6854,88 @@ impl AcpThread {
         cx: &App,
     ) -> Option<policy::PolicyDecision> {
         let agent_id = self.connection.agent_id();
+        let agent_version = self.connection.agent_version();
         policy::ThreadPolicies::decide(
             &policy::PolicyContext {
                 agent_id: &agent_id,
+                agent_version: agent_version.as_deref(),
                 session_id: &self.session_info.session_id,
                 parent_session_id: self.parent_session_id.as_ref(),
             },
             request,
             cx,
         )
+    }
+
+    /// Tells the agent's policy, if any, that a request is waiting for the user.
+    fn notify_policy_pending(&self, id: PermissionRequestId, cx: &mut Context<Self>) {
+        let agent_id = self.connection.agent_id();
+        let Some(policy) = policy::ThreadPolicies::for_agent(&agent_id, cx) else {
+            return;
+        };
+        let agent_version = self.connection.agent_version();
+        policy.permission_pending(
+            &policy::PolicyContext {
+                agent_id: &agent_id,
+                agent_version: agent_version.as_deref(),
+                session_id: &self.session_info.session_id,
+                parent_session_id: self.parent_session_id.as_ref(),
+            },
+            cx.weak_entity(),
+            id,
+            cx,
+        );
+    }
+
+    /// Answers a pending request with its one-time allow or reject option, as if the user
+    /// had picked it in the thread. Without such an option the request is cancelled.
+    pub fn answer_permission_request(
+        &mut self,
+        id: PermissionRequestId,
+        allow: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let kind = if allow {
+            acp_v2::PermissionOptionKind::AllowOnce
+        } else {
+            acp_v2::PermissionOptionKind::RejectOnce
+        };
+        let Some(request) = self.permission_requests.get(&id) else {
+            return;
+        };
+        match &request.data {
+            PermissionRequestData::LegacyTool { options, .. } => {
+                match options.first_option_of_kind(kind) {
+                    Some(option) => {
+                        let outcome = SelectedPermissionOutcome::new(
+                            option.option_id.clone(),
+                            option.kind.clone(),
+                        );
+                        self.authorize_permission_request(id, outcome, cx);
+                    }
+                    None => self.cancel_permission_request(id, cx),
+                }
+            }
+            PermissionRequestData::Generic { request, .. } => {
+                match request.options.iter().find(|option| option.kind == kind) {
+                    Some(option) => {
+                        let option_id = option.option_id.clone();
+                        self.select_permission_option(id, option_id, cx);
+                    }
+                    None => self.cancel_permission_request(id, cx),
+                }
+            }
+        }
+    }
+
+    /// A short description of a pending request, for showing it outside the thread.
+    pub fn permission_request_title(&self, id: PermissionRequestId, cx: &App) -> Option<String> {
+        match &self.permission_requests.get(&id)?.data {
+            PermissionRequestData::LegacyTool { tool_call_id, .. } => self
+                .tool_call(tool_call_id)
+                .map(|(_, call)| call.label.read(cx).source().to_string()),
+            PermissionRequestData::Generic { request, .. } => Some(request.title.clone()),
+        }
     }
 
     fn push_policy_notice(&mut self, title: &str, reason: SharedString, cx: &mut Context<Self>) {
@@ -6973,7 +7047,8 @@ impl AcpThread {
                         ),
                     ],
                 );
-                let (_, outcome) = self.install_generic_permission_request(request, true, cx);
+                let (id, outcome) = self.install_generic_permission_request(request, true, cx);
+                self.notify_policy_pending(id, cx);
                 cx.spawn(async move |_, _| match outcome.await {
                     acp_v2::RequestPermissionOutcome::Selected(selected)
                         if selected.option_id.0.as_ref() == POLICY_ALLOW_OPTION_ID =>
@@ -7171,7 +7246,10 @@ impl AcpThread {
         );
         match policy_answer {
             Some(answer) => self.apply_policy_permission_answer(id, answer, cx),
-            None => cx.emit(AcpThreadEvent::ToolAuthorizationRequested(id)),
+            None => {
+                cx.emit(AcpThreadEvent::ToolAuthorizationRequested(id));
+                self.notify_policy_pending(id, cx);
+            }
         }
 
         Ok((

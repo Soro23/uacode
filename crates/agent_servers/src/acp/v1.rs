@@ -1115,6 +1115,7 @@ impl AcpConnection {
         cx: &mut AsyncApp,
     ) -> Task<()> {
         let id = self.id.clone();
+        let agent_version = self.agent_version.clone();
         let defaults = self.defaults.clone();
         let session_id = session_id.clone();
         let config_options = config_options.clone();
@@ -1189,7 +1190,14 @@ impl AcpConnection {
                 // UACode: the agent's thread policy can refuse a default mode option.
                 if let Some(mode) = mode_option_value(&config_option, &value_to_apply)
                     && !cx.update(|cx| {
-                        mode_change_allowed(&id, &session_id, mode, ModeChangeOrigin::Default, cx)
+                        mode_change_allowed(
+                            &id,
+                            agent_version.as_deref(),
+                            &session_id,
+                            mode,
+                            ModeChangeOrigin::Default,
+                            cx,
+                        )
                     })
                 {
                     continue;
@@ -1372,8 +1380,12 @@ impl AgentConnection for AcpConnection {
         };
         let name = self.id.0.clone();
         let mcp_servers = mcp_servers_for_project(&project, cx);
-        // UACode: the agent's thread policy can add launch options to the session.
-        let session_meta = ThreadPolicies::new_session_meta(&self.id, cx);
+        // The agent's thread policy can refuse the session or add launch options to it.
+        let session_meta =
+            match ThreadPolicies::start_session(&self.id, self.agent_version.as_deref(), cx) {
+                Ok(meta) => meta,
+                Err(reason) => return Task::ready(Err(anyhow!("{reason}"))),
+            };
 
         cx.spawn(async move |cx| {
             let (response_sender, response_received) = futures::channel::oneshot::channel();
@@ -1442,6 +1454,7 @@ impl AgentConnection for AcpConnection {
                 cx.update(|cx| {
                     mode_change_allowed(
                         &self.id,
+                        self.agent_version.as_deref(),
                         &policy_session_id,
                         mode.0.as_ref(),
                         ModeChangeOrigin::Default,
@@ -1575,8 +1588,12 @@ impl AgentConnection for AcpConnection {
         }
 
         let mcp_servers = mcp_servers_for_project(&project, cx);
-        // UACode: launch options must be repeated whenever the agent restores a session.
-        let session_meta = ThreadPolicies::new_session_meta(&self.id, cx);
+        // Launch options must be repeated whenever the agent restores a session.
+        let session_meta =
+            match ThreadPolicies::start_session(&self.id, self.agent_version.as_deref(), cx) {
+                Ok(meta) => meta,
+                Err(reason) => return Task::ready(Err(anyhow!("{reason}"))),
+            };
         self.open_or_create_session(
             session_id,
             project,
@@ -1623,8 +1640,12 @@ impl AgentConnection for AcpConnection {
         }
 
         let mcp_servers = mcp_servers_for_project(&project, cx);
-        // UACode: launch options must be repeated whenever the agent restores a session.
-        let session_meta = ThreadPolicies::new_session_meta(&self.id, cx);
+        // Launch options must be repeated whenever the agent restores a session.
+        let session_meta =
+            match ThreadPolicies::start_session(&self.id, self.agent_version.as_deref(), cx) {
+                Ok(meta) => meta,
+                Err(reason) => return Task::ready(Err(anyhow!("{reason}"))),
+            };
         self.open_or_create_session(
             session_id,
             project,
@@ -1816,6 +1837,7 @@ impl AgentConnection for AcpConnection {
         if let Some(modes) = session.session_modes.as_ref() {
             Some(Rc::new(AcpSessionModes {
                 agent_id: self.id.clone(),
+                agent_version: self.agent_version.clone(),
                 connection: self.connection.clone(),
                 session_id: session_id.clone(),
                 state: modes.clone(),
@@ -1846,6 +1868,7 @@ impl AgentConnection for AcpConnection {
 
         Some(Rc::new(AcpSessionConfigOptions {
             agent_id: self.id.clone(),
+            agent_version: self.agent_version.clone(),
             session_id: session_id.clone(),
             connection: self.connection.clone(),
             config_options: config_opts.clone(),
@@ -2634,6 +2657,7 @@ mod tests {
 
     struct TestPolicy {
         session_meta: Option<acp_v2::Meta>,
+        refusal: Option<SharedString>,
         denied_mode: &'static str,
     }
 
@@ -2654,8 +2678,16 @@ mod tests {
             }
         }
 
-        fn new_session_meta(&self, _: &AgentId, _: &App) -> Option<acp_v2::Meta> {
-            self.session_meta.clone()
+        fn start_session(
+            &self,
+            _: &AgentId,
+            _: Option<&str>,
+            _: &App,
+        ) -> Result<Option<acp_v2::Meta>, SharedString> {
+            match &self.refusal {
+                Some(reason) => Err(reason.clone()),
+                None => Ok(self.session_meta.clone()),
+            }
         }
     }
 
@@ -2783,6 +2815,7 @@ mod tests {
                     agent_id,
                     Rc::new(TestPolicy {
                         session_meta,
+                        refusal: None,
                         denied_mode: "bypassPermissions",
                     }),
                     cx,
@@ -2806,6 +2839,47 @@ mod tests {
         assert_eq!(
             *agent.new_session_meta.lock().expect("session meta"),
             [None, Some(meta)]
+        );
+    }
+
+    #[gpui::test]
+    async fn policy_can_refuse_a_session(cx: &mut gpui::TestAppContext) {
+        let agent = connect_policy_test_agent(cx).await;
+        let agent_id = agent.connection.id.clone();
+        cx.update(|cx| {
+            ThreadPolicies::register(
+                agent_id,
+                Rc::new(TestPolicy {
+                    session_meta: None,
+                    refusal: Some("Versión de adaptador no verificada".into()),
+                    denied_mode: "bypassPermissions",
+                }),
+                cx,
+            )
+        });
+        let error = cx
+            .update(|cx| {
+                agent.connection.clone().new_session(
+                    agent.project.clone(),
+                    PathList::new(&[std::path::PathBuf::from("/a")]),
+                    cx,
+                )
+            })
+            .await
+            .expect_err("the policy refuses the session");
+        assert!(
+            error
+                .to_string()
+                .contains("Versión de adaptador no verificada"),
+            "{error:#}"
+        );
+        assert!(
+            agent
+                .new_session_meta
+                .lock()
+                .expect("session meta")
+                .is_empty(),
+            "a refused session never reaches the agent"
         );
     }
 
@@ -6834,6 +6908,7 @@ mod tests {
         .detach();
         let modes = AcpSessionModes {
             agent_id: AgentId::new("test"),
+            agent_version: None,
             session_id: acp_v2::SessionId::new("mode-session"),
             connection: receiver.await.expect("client connected"),
             state: Rc::new(RefCell::new(acp::SessionModeState::new(
@@ -7398,6 +7473,7 @@ mod tests {
         ])));
         let options = AcpSessionConfigOptions {
             agent_id: AgentId::new("test"),
+            agent_version: None,
             session_id: acp_v2::SessionId::new("session"),
             connection: connection.connection.clone(),
             config_options: config,
@@ -10481,6 +10557,7 @@ fn config_state(
 // UACode: mode changes pass through the agent's thread policy (`acp_thread::policy`).
 fn mode_policy_denial(
     agent_id: &AgentId,
+    agent_version: Option<&str>,
     session_id: &acp_v2::SessionId,
     mode: &str,
     origin: ModeChangeOrigin,
@@ -10489,6 +10566,7 @@ fn mode_policy_denial(
     let decision = ThreadPolicies::decide(
         &PolicyContext {
             agent_id,
+            agent_version,
             session_id,
             parent_session_id: None,
         },
@@ -10500,12 +10578,13 @@ fn mode_policy_denial(
 
 fn mode_change_allowed(
     agent_id: &AgentId,
+    agent_version: Option<&str>,
     session_id: &acp_v2::SessionId,
     mode: &str,
     origin: ModeChangeOrigin,
     cx: &App,
 ) -> bool {
-    match mode_policy_denial(agent_id, session_id, mode, origin, cx) {
+    match mode_policy_denial(agent_id, agent_version, session_id, mode, origin, cx) {
         None => true,
         Some(reason) => {
             log::info!("Mode `{mode}` refused by the agent's policy: {reason}");
@@ -10558,6 +10637,7 @@ fn revert_agent_mode(
 
 struct AcpSessionModes {
     agent_id: AgentId,
+    agent_version: Option<SharedString>,
     session_id: acp_v2::SessionId,
     connection: ConnectionTo<Agent>,
     state: Rc<RefCell<acp::SessionModeState>>,
@@ -10590,6 +10670,7 @@ impl acp_thread::AgentSessionModes for AcpSessionModes {
         // UACode: the agent's thread policy can refuse the user's mode change.
         if let Some(reason) = mode_policy_denial(
             &self.agent_id,
+            self.agent_version.as_deref(),
             &self.session_id,
             mode_id.0.as_ref(),
             ModeChangeOrigin::User,
@@ -10626,6 +10707,7 @@ impl acp_thread::AgentSessionModes for AcpSessionModes {
 
 struct AcpSessionConfigOptions {
     agent_id: AgentId,
+    agent_version: Option<SharedString>,
     session_id: acp_v2::SessionId,
     connection: ConnectionTo<Agent>,
     config_options: ConfigOptions,
@@ -10653,6 +10735,7 @@ impl acp_thread::AgentSessionConfigOptions for AcpSessionConfigOptions {
             .and_then(|mode| {
                 mode_policy_denial(
                     &self.agent_id,
+                    self.agent_version.as_deref(),
                     &self.session_id,
                     mode,
                     ModeChangeOrigin::User,
