@@ -22,6 +22,8 @@ pub const AGENT_ID_PREFIX: &str = "office-";
 
 const CLAUDE_ADAPTER: &str = "@agentclientprotocol/claude-agent-acp@0.94.0";
 const CODEX_ADAPTER: &str = "@agentclientprotocol/codex-acp@2.5.0";
+const CODEX_INITIAL_MODE_VARIABLE: &str = "INITIAL_AGENT_MODE";
+const CODEX_INITIAL_MODE: &str = "read-only";
 
 /// Cleared so an inherited key never replaces the account's subscription login.
 const CLEARED_CREDENTIAL_VARIABLES: [&str; 5] = [
@@ -109,6 +111,14 @@ pub fn adapter_command(
         config_variable.to_string(),
         folder.to_string_lossy().into_owned(),
     );
+    if provider == Provider::Codex {
+        // codex-acp otherwise starts sessions in "agent" mode, where an automatic reviewer
+        // approves workspace writes instead of the user. Phase 1 is read-only.
+        env.insert(
+            CODEX_INITIAL_MODE_VARIABLE.to_string(),
+            CODEX_INITIAL_MODE.to_string(),
+        );
+    }
     AgentServerCommand {
         // On Windows `npx` resolves to a PowerShell script that cannot be spawned directly.
         path: if cfg!(windows) { "npx.cmd" } else { "npx" }.into(),
@@ -367,7 +377,9 @@ mod tests {
             command.args,
             vec!["-y", "@agentclientprotocol/codex-acp@2.5.0"]
         );
-        assert_eq!(command.env, Some(expected_env("CODEX_HOME", folder)));
+        let mut env = expected_env("CODEX_HOME", folder);
+        env.insert("INITIAL_AGENT_MODE".into(), "read-only".into());
+        assert_eq!(command.env, Some(env));
     }
 
     // `gpui::test` discards the returned value, so failures must surface through `expect`.
