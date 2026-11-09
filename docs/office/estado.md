@@ -1,6 +1,6 @@
 # Office: estado de desarrollo
 
-Actualizado: 2026-11-08.
+Actualizado: 2026-11-09.
 
 ## Estado actual
 
@@ -10,7 +10,8 @@ Actualizado: 2026-11-08.
 - Fase 1, paso 1: implementado el crate office con panel vacío, acción `office: toggle focus`, botón de dock y respeto de disable_ai. Compilación y arranque comprobados; apertura por paleta, cierre/reapertura por botón y traslado derecha → izquierda → derecha verificados visualmente.
 - Fase 1, paso 2: puestos persistentes en `.uacode/office.json` (commit `d0539a0d60`). Crear, editar y archivar puestos; JSON inválido o versión futura en solo lectura con «Abrir archivo» y «Recargar»; posición del dock persistida en la base de datos local.
 - Fase 1, paso 3: catálogo global de cuentas en `accounts.json` (commit `15beb0e1aa`). Alta con nombre único por proveedor, entradas virtuales «Por defecto», importación explícita de carpetas existentes y selector de cuenta en el puesto. Todas las cuentas «Sin probar».
-- Fase 1, paso 4: registro, login y comprobación de cuentas (commits `e5e8ca9371`, `9c1992fc03`, `040f12e913`). Un agente `office-<proveedor>-<id corto>` por cuenta, registrado dinámicamente sin escribir ajustes; «Iniciar sesión» crea la carpeta y lanza el login de suscripción; «Comprobar» sondea `_auth/status_update`. Pendiente: prueba de login real por el usuario.
+- Fase 1, paso 4: registro, login y comprobación de cuentas (commits `e5e8ca9371`, `9c1992fc03`, `040f12e913`). Un agente `office-<proveedor>-<id corto>` por cuenta, registrado dinámicamente sin escribir ajustes; «Iniciar sesión» crea la carpeta y lanza el login de suscripción; «Comprobar» sondea `_auth/status_update`. Aprobado en el mensaje #7 tras la prueba de login real del usuario.
+- Fase 1, paso 5: gancho de política (commits `7672740417` en `acp_thread` + `agent_servers`, `b09deb699c` en `office`). `ThreadPolicy` por `AgentId` para permisos, escrituras y terminales del cliente, modo y `_meta` de sesión; Codex de Office arranca en `read-only`. Verificado a mano con prompts reales y una política de prueba en la rama `office-step5-test` (sin fusionar). Pendiente de revisión.
 
 ## Decisiones vigentes
 
@@ -35,9 +36,13 @@ Actualizado: 2026-11-08.
 
 ## Siguiente paso
 
-Paso 4 implementado (mensajes #5 y #6). Pendiente: prueba de login real por el usuario con las instrucciones del buzón y su confirmación antes del paso 5.
+Revisión del paso 5 por Claude y decisión sobre la rama `office-step5-test` (política de prueba; se puede borrar o conservar como referencia para el paso 6). Después, paso 6: política por puesto/rol sobre el gancho.
 
-Pendiente del paso 7: cambiar el modo o el modelo por defecto en un hilo de Office puede escribir una entrada `office-…` en `settings.json`. No se bloquea en el paso 4 (el prefijo reservado evita que rompa el agente); el bloqueo real llega cuando Office controle sus hilos.
+Pendientes conocidos:
+- Paso 6: la política real por puesto (la de prueba deniega todo permiso y escritura, y fija `disallowedTools`, `allowDangerouslySkipPermissions: false` y `settingSources: ["user"]` para Claude).
+- Paso 7: elegir modelo en un hilo de Office escribe `agent_servers.office-…` con `type: registry` y `default_config_options.model` en `settings.json` (confirmado en la prueba del paso 5). El prefijo reservado evita que rompa el agente; el bloqueo llega en el paso 7.
+- Sandbox de Codex en Windows: sin demostrar. En read-only, Codex pidió escalada en vez de intentar escribir, así que la barrera efectiva fue el gancho.
+- En codex-acp el único rechazo de un cambio de archivo es la decisión `cancel`, que termina el turno (diseno.md 2.7 prefería no usar `cancel` como rechazo ordinario; aquí no hay alternativa).
 
 ## Reglas de trabajo
 
@@ -48,6 +53,7 @@ Pendiente del paso 7: cambiar el modo o el modelo por defecto en un hilo de Offi
 - Actualizar este archivo en cada paso con lo hecho, pendiente y decisiones nuevas.
 - AGENTS.md es un enlace simbólico a .rules, adaptado al fork: no añadir avisos de revisión upstream al README; seguir el protocolo del buzón.
 - Preferir codebase-memory-mcp para descubrir código. Usar `./script/clippy` si se necesita clippy.
+- La app de prueba se lanza siempre con `--user-data-dir` aislado. No usar computer-use para traer la ventana al frente si eso puede lanzar otra instancia; si ocurre, cerrarla y avisar.
 
 ## Historial
 
@@ -112,3 +118,20 @@ Pendiente del paso 7: cambiar el modo o el modelo por defecto en un hilo de Offi
 - Prueba manual con `--user-data-dir target/office-step4-test/data`: el panel muestra «Por defecto» de Claude y Codex con «Iniciar sesión» y «Comprobar». «Comprobar» en Claude sin carpeta: «Requiere login» al instante y la carpeta no se crea. En Codex con carpeta vacía: «Comprobando…» y luego «Requiere login» (sondeo real con codex-acp 2.5.0); después no queda ningún proceso `codex-acp`.
 - Incidencia: al traer la ventana al frente con computer-use se lanzó una segunda instancia debug sin argumentos (datos reales). Se cerró sin tocar nada; no se creó `%APPDATA%\UACode\office`.
 - No se ha hecho ningún login real ni se ha leído ningún archivo de credenciales.
+- Prueba manual del usuario (mensaje #7) con `--user-data-dir` aislado: OK. Dos cuentas de Claude distintas (personal y PREICO) y Codex conectadas, cada una con su correo y su plan; se mantienen tras reiniciar; sin procesos `claude-agent-acp` ni `codex-acp` huérfanos tras cerrar UACode; el menú del panel de agentes muestra solo «Office · Claude · Por defecto», «Office · Claude · Prueba» y «Office · Codex · Por defecto».
+
+- 2026-11-09, mensaje #8: diseño del paso 5 aprobado (clave `AgentId` con sesión en el contexto, `_meta` de sesión incluido, `AskUser` en modo solo para el usuario, protección contra bucles, `INITIAL_AGENT_MODE` y prueba manual autorizada). Fase B implementada y verificada; ver «Verificación del paso 5».
+
+## Verificación del paso 5
+
+- Tests: `acp_thread` 310 (7 nuevos en `policy.rs`: sin política espera al usuario y la política de otro agente no afecta; denegar resuelve con `reject_once` sin pedir nada, bloquea escritura y terminal y deja aviso; sin `reject_once` cancela; permitir nunca elige `allow_always`; preguntar deja permiso, escritura y terminal en manos del usuario; el segundo cambio de modo denegado del agente cancela el turno; semántica de `AskUser` en modo); `agent_servers` 183 (2 nuevos: `_meta` solo se envía con política; el modo del usuario denegado no se envía y el del agente se revierte con `session/set_mode`); `office` 28 (el env de Codex incluye `INITIAL_AGENT_MODE=read-only` y el de Claude no). `cargo check -p agent_ui -p agent` sin errores. Clippy de `acp_thread`, `agent_servers` y `office` (`--all-targets --deny warnings`) sin avisos.
+- Tiempos debug: tests de `acp_thread` 3 min 55 s; `cargo build -p zed` incremental 2 min 39 s.
+- Prueba manual con prompts reales (`--user-data-dir target\office-login-test\data`, proyecto desechable `target\office-step5-test\proyecto` con git init y sin remotos, rama `office-step5-test` con una política de solo consulta). Registro detallado en `target\office-step5-test\registro.md`.
+  - a) Codex (5.6 Luna, Low), arranca en Read-only. Prompt 1, crear un archivo y ejecutar `echo`: permiso de «Edit files» denegado por la política; el rechazo de codex-acp para archivos es `cancel` y terminó el turno. Prompt 2, solo el comando: escalada de «Run command» denegada. Prompt 3, ejecutar dentro del sandbox sin pedir permisos: Codex volvió a pedir escalada y se denegó. `git status` limpio tras cada prompt. El sandbox de Windows no llegó a ejercitarse.
+  - b) Claude (Haiku 4.5), arranca en Manual. El selector no ofrece «Bypass permissions» y elegir «Accept edits» no cambia el modo. Pedir editar `notas.txt`: Edit, Write y Bash «No such tool available … disabled for this session». `git status` limpio.
+  - c) Claude con `.claude/settings.json` en el proyecto que preautoriza Write, Edit y Bash y fija `defaultMode: acceptEdits`: la sesión arranca en Manual (ajustes del proyecto ignorados) y Write/Bash siguen sin existir. `git status` limpio. Como `disallowedTools` quita las herramientas de raíz, la prueba de que se ignoran las reglas `allow` del proyecto es indirecta (el `defaultMode` ignorado).
+  - Prompts enviados: 3 a Codex y 2 a Claude. Ningún caso escribió en disco.
+  - Al cerrar UACode no quedó ningún proceso `uacode`, `claude-agent-acp` ni `codex-acp`. Elegir modelo escribió entradas `office-…` en el `settings.json` de los datos aislados (pendiente del paso 7).
+  - Computer-use no lanzó otra instancia: la app se abrió desde la terminal y solo se pulsó dentro de su ventana.
+
+- 2026-11-09, mensaje #7: paso 4 aprobado. Regla nueva sobre instancias de prueba. Paso 5 aprobado en dos fases; entregado el diseño de la Fase A (puntos de permiso, escritura, terminal y modo; interfaz `ThreadPolicy` por `AgentId`; límites de cada adaptador leídos en su código fijado).
