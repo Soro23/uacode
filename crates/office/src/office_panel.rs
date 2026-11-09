@@ -272,51 +272,50 @@ impl OfficePanel {
         for (index, (request, title)) in approvals.into_iter().enumerate() {
             let element_id =
                 |action: &str| -> SharedString { format!("{action}-{}-{index}", post.id).into() };
+            // Titles and reasons can be long paths: they get their own truncated line so
+            // the buttons always stay inside the card.
             state =
-                state.child(
-                    h_flex()
-                        .gap_2()
-                        .child(Label::new(title).size(LabelSize::Small))
-                        .child(
-                            Button::new(element_id("approve"), "Aprobar").on_click(cx.listener(
-                                move |panel, _, _, cx| {
+                state
+                    .child(Label::new(title).size(LabelSize::Small).truncate())
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(Button::new(element_id("approve"), "Aprobar").on_click(
+                                cx.listener(move |panel, _, _, cx| {
                                     panel.accounts.update(cx, |accounts, cx| {
                                         accounts.answer_approval(request, true, cx)
                                     })
-                                },
+                                }),
+                            ))
+                            .child(Button::new(element_id("reject"), "Rechazar").on_click(
+                                cx.listener(move |panel, _, _, cx| {
+                                    panel.accounts.update(cx, |accounts, cx| {
+                                        accounts.answer_approval(request, false, cx)
+                                    })
+                                }),
                             )),
-                        )
-                        .child(Button::new(element_id("reject"), "Rechazar").on_click(
-                            cx.listener(move |panel, _, _, cx| {
-                                panel.accounts.update(cx, |accounts, cx| {
-                                    accounts.answer_approval(request, false, cx)
-                                })
-                            }),
-                        )),
-                );
+                    );
         }
         if let Some(notice) = notice {
             let dismissed = post.clone();
-            state = state.child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Label::new(format!("Bloqueado: {notice}"))
-                            .size(LabelSize::Small)
-                            .color(Color::Error),
+            state = state
+                .child(
+                    Label::new(format!("Bloqueado: {notice}"))
+                        .size(LabelSize::Small)
+                        .color(Color::Error)
+                        .truncate(),
+                )
+                .child(
+                    Button::new(
+                        SharedString::from(format!("dismiss-notice-{}", post.id)),
+                        "Descartar",
                     )
-                    .child(
-                        Button::new(
-                            SharedString::from(format!("dismiss-notice-{}", post.id)),
-                            "Descartar",
-                        )
-                        .on_click(cx.listener(move |panel, _, _, cx| {
-                            panel.accounts.update(cx, |accounts, cx| {
-                                accounts.dismiss_policy_notice(&dismissed, cx)
-                            })
-                        })),
-                    ),
-            );
+                    .on_click(cx.listener(move |panel, _, _, cx| {
+                        panel.accounts.update(cx, |accounts, cx| {
+                            accounts.dismiss_policy_notice(&dismissed, cx)
+                        })
+                    })),
+                );
         }
         state.into_any_element()
     }
