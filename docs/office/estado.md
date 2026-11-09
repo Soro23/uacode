@@ -42,7 +42,7 @@ Revisión del paso 6 por Claude. Después se borra la rama `office-step5-test` (
 Pendientes conocidos:
 - Los hilos aún no están ligados a puestos: la tarjeta muestra aprobaciones y bloqueos del agente de su cuenta, así que dos puestos con la misma cuenta ven lo mismo. Se resuelve cuando Office abra los hilos de cada puesto (sesión → puesto); la política ya busca sus reglas por hilo (`rules_for`).
 - Paso 7: elegir modelo o modo en un hilo de Office escribe `agent_servers.office-…` con `type: registry` y `default_config_options` en `settings.json` (confirmado en los pasos 5 y 6; quedó `"mode": "agent-full-access"` en los datos aislados por el fallo v2 ya corregido). La política rechaza un modo por defecto no permitido, pero el bloqueo de esas escrituras llega en el paso 7.
-- Las builds debug activan `acp-beta` (flags de equipo activos en debug) y Codex usa ACP v2; en release usaría v1. La política cubre ambas rutas desde `f5ec3d7830`.
+- Las builds debug activan `acp-beta` (flags de equipo activos en debug) y Codex usa ACP v2; en release usaría v1. Las decisiones de política de sesión (inicio, modo por defecto, cambio del usuario y del agente) viven en `crates/agent_servers/src/acp/session_policy.rs` y v1 y v2 las llaman igual; los tests `consult_only_modes_on_v1_connection` y `v2_consult_only_modes_on_v2_connection` comprueban los mismos casos en ambas rutas.
 - **Riesgo abierto:** el sandbox read-only de Codex en Windows no ha quedado demostrado (en el paso 5 Codex pidió escalada en vez de intentar escribir, así que la barrera efectiva fue el gancho). Se vuelve a probar en la Fase 3, cuando workspace-write sea relevante.
 - En codex-acp el único rechazo de un cambio de archivo es la decisión `cancel`, que termina el turno (diseno.md 2.7 prefería no usar `cancel` como rechazo ordinario; aquí no hay alternativa).
 
@@ -55,6 +55,7 @@ Pendientes conocidos:
 - Actualizar este archivo en cada paso con lo hecho, pendiente y decisiones nuevas.
 - AGENTS.md es un enlace simbólico a .rules, adaptado a UACode como proyecto independiente: no añadir avisos de revisión upstream al README; seguir el protocolo del buzón.
 - Preferir codebase-memory-mcp para descubrir código. Usar `./script/clippy` si se necesita clippy.
+- Las pruebas manuales de política deben cubrir la ruta ACP v1 y la v2: en debug los flags de equipo (`acp-beta`) están activos y en release no, así que el mismo agente puede ir por rutas distintas. Codex va por v2 en debug y por v1 en release; Claude siempre por v1.
 - La app de prueba se lanza siempre con `--user-data-dir` aislado. No usar computer-use para traer la ventana al frente si eso puede lanzar otra instancia; si ocurre, cerrarla y avisar.
 
 ## Historial

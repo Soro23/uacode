@@ -1,5 +1,6 @@
 mod debug_log;
 mod runtime;
+mod session_policy;
 mod session_updates;
 mod terminal_updates;
 mod transport;
@@ -887,86 +888,6 @@ fn apply_subagent_update(
     Ok(subagent)
 }
 
-/// The mode a value selects when `option` is the session's mode selector.
-pub(crate) fn mode_option_value<'a>(
-    option: &acp_v2::SessionConfigOption,
-    value: &'a acp_v2::SessionConfigOptionValue,
-) -> Option<&'a str> {
-    if !matches!(
-        option.category,
-        Some(acp_v2::SessionConfigOptionCategory::Mode)
-    ) {
-        return None;
-    }
-    match value {
-        acp_v2::SessionConfigOptionValue::Id { value } => Some(value.0.as_ref()),
-        _ => None,
-    }
-}
-
-fn current_mode(
-    options: &[acp_v2::SessionConfigOption],
-) -> Option<(acp_v2::SessionConfigId, String)> {
-    options.iter().find_map(|option| {
-        if !matches!(
-            option.category,
-            Some(acp_v2::SessionConfigOptionCategory::Mode)
-        ) {
-            return None;
-        }
-        match &option.kind {
-            acp_v2::SessionConfigKind::Select(select) => {
-                Some((option.config_id.clone(), select.current_value.0.to_string()))
-            }
-            _ => None,
-        }
-    })
-}
-
-/// The agent's thread policy can revert a mode the agent switched to on its own.
-fn check_agent_mode_change(
-    thread: &WeakEntity<AcpThread>,
-    session_id: &acp_v2::SessionId,
-    previous: &[acp_v2::SessionConfigOption],
-    updated: &[acp_v2::SessionConfigOption],
-    cx: &mut AsyncApp,
-) {
-    let (Some((config_id, previous_mode)), Some((_, updated_mode))) =
-        (current_mode(previous), current_mode(updated))
-    else {
-        return;
-    };
-    if previous_mode == updated_mode {
-        return;
-    }
-    let Some(thread) = thread.upgrade() else {
-        return;
-    };
-    let stands = thread.update(cx, |thread, cx| {
-        thread.agent_mode_change_stands(&updated_mode, cx)
-    });
-    if stands {
-        return;
-    }
-    let revert = cx.update(|cx| {
-        let options = thread
-            .read(cx)
-            .connection()
-            .session_config_options(session_id, cx)?;
-        Some(options.set_config_option(
-            config_id,
-            acp_v2::SessionConfigOptionValue::id(previous_mode),
-            cx,
-        ))
-    });
-    if let Some(revert) = revert {
-        cx.background_spawn(async move {
-            revert.await.log_err();
-        })
-        .detach();
-    }
-}
-
 fn apply_v2_session_notification(
     notification: InboundSessionNotification,
     thread: &WeakEntity<AcpThread>,
@@ -1004,7 +925,7 @@ fn apply_v2_session_notification(
             update.config_options.clone(),
         );
         config_options.tx.borrow_mut().send(()).log_err();
-        check_agent_mode_change(
+        session_policy::check_agent_config_mode_change(
             thread,
             &notification.session_id,
             &previous,

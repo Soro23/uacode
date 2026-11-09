@@ -1,10 +1,11 @@
+use super::session_policy::{self, PolicyTarget};
 use super::{
     AcpDebugLog, AcpDebugMessage, AcpSession, ClientContext, ConfigOptions,
     ContextServerConfiguration, ForegroundWork, PendingSessionUpdates, ReadOnlyConfigOptions,
     UnsupportedVersion, apply_v2_session_notification, close_undelivered_session,
     drain_foreground_queue, enqueue_notification, first_class_terminal_auth_task,
     is_disconnect_error, is_resource_not_found, map_acp_error, mcp_configurations_for_project,
-    mode_option_value, runtime, transport, with_v2_client_ingress, work_dirs_from_session_info,
+    runtime, transport, with_v2_client_ingress, work_dirs_from_session_info,
 };
 use acp_thread::{
     AcpThread, AgentConnection, AgentSessionConfigOptions, AgentSessionInfo, AgentSessionList,
@@ -834,6 +835,7 @@ impl AcpV2Connection {
             .update(|cx| self.session_config_options(thread.read(cx).session_id(), cx))
             .context("New session was released before applying defaults")?;
         let mut attempted = Vec::new();
+        let agent_version = self.agent_version();
         loop {
             let next = cx.update(|cx| {
                 let settings = cx
@@ -860,16 +862,12 @@ impl AcpV2Connection {
                                 .map(|value| acp::SessionConfigOptionValue::id(value.to_owned())),
                             _ => None,
                         }?;
-                        if let Some(mode) = mode_option_value(&option, &value)
-                            && let Some(reason) = thread.read(cx).mode_change_denial(
-                                mode,
-                                acp_thread::policy::ModeChangeOrigin::Default,
-                                cx,
-                            )
-                        {
-                            log::info!(
-                                "Default mode `{mode}` refused by the agent's policy: {reason}"
-                            );
+                        let target = PolicyTarget {
+                            agent_id: &self.id,
+                            agent_version: agent_version.as_deref(),
+                            session_id: thread.read(cx).session_id(),
+                        };
+                        if !target.default_config_allowed(&option, &value, cx) {
                             return None;
                         }
                         config_option_supports_value(&option, &value)
@@ -1024,14 +1022,11 @@ impl AcpV2Connection {
             self.remove_session(&session_id, thread.entity_id());
         }
         // Launch options must be repeated whenever the agent restores a session.
-        let session_meta = match acp_thread::policy::ThreadPolicies::start_session(
-            &self.id,
-            self.agent_version().as_deref(),
-            cx,
-        ) {
-            Ok(meta) => meta,
-            Err(reason) => return Task::ready(Err(anyhow!("{reason}"))),
-        };
+        let session_meta =
+            match session_policy::session_meta(&self.id, self.agent_version().as_deref(), cx) {
+                Ok(meta) => meta,
+                Err(error) => return Task::ready(Err(error)),
+            };
         let mut request = acp::ResumeSessionRequest::new(session_id.clone(), context.cwd.clone())
             .additional_directories(context.additional_directories.clone())
             .mcp_servers(context.mcp_servers.clone())
@@ -1316,14 +1311,11 @@ impl AgentConnection for AcpV2Connection {
             Err(error) => return Task::ready(Err(error)),
         };
         // The agent's thread policy can refuse the session or add launch options to it.
-        let session_meta = match acp_thread::policy::ThreadPolicies::start_session(
-            &self.id,
-            self.agent_version().as_deref(),
-            cx,
-        ) {
-            Ok(meta) => meta,
-            Err(reason) => return Task::ready(Err(anyhow!("{reason}"))),
-        };
+        let session_meta =
+            match session_policy::session_meta(&self.id, self.agent_version().as_deref(), cx) {
+                Ok(meta) => meta,
+                Err(error) => return Task::ready(Err(error)),
+            };
         let request = acp::NewSessionRequest::new(context.cwd.clone())
             .additional_directories(context.additional_directories.clone())
             .mcp_servers(context.mcp_servers.clone())
@@ -1759,6 +1751,8 @@ impl AgentConnection for AcpV2Connection {
         let sessions = self.sessions.borrow();
         let session = sessions.get(session_id)?;
         Some(Rc::new(V2SessionConfigOptions {
+            agent_id: self.id.clone(),
+            agent_version: self.agent_version(),
             session_id: session_id.clone(),
             thread: session.thread.clone(),
             sessions: self.sessions.clone(),
@@ -1864,6 +1858,8 @@ impl AgentSessionList for V2SessionList {
 
 #[derive(Clone)]
 struct V2SessionConfigOptions {
+    agent_id: AgentId,
+    agent_version: Option<SharedString>,
     session_id: acp::SessionId,
     thread: WeakEntity<AcpThread>,
     sessions: Rc<RefCell<HashMap<acp::SessionId, AcpSession>>>,
@@ -1917,21 +1913,18 @@ impl AgentSessionConfigOptions for V2SessionConfigOptions {
         if let Err(error) = self.validate(&config_id, &value) {
             return Task::ready(Err(error));
         }
-        // The agent's thread policy can refuse the user's mode change.
-        let mode_denial = self
-            .options
-            .config_options
-            .borrow()
-            .iter()
-            .find(|option| option.config_id == config_id)
-            .and_then(|option| mode_option_value(option, &value))
-            .and_then(|mode| {
-                self.thread.upgrade()?.read(cx).mode_change_denial(
-                    mode,
-                    acp_thread::policy::ModeChangeOrigin::User,
-                    cx,
-                )
-            });
+        let target = PolicyTarget {
+            agent_id: &self.agent_id,
+            agent_version: self.agent_version.as_deref(),
+            session_id: &self.session_id,
+        };
+        let mode_denial = target.config_mode_denial(
+            &self.options.config_options.borrow(),
+            &config_id,
+            &value,
+            acp_thread::policy::ModeChangeOrigin::User,
+            cx,
+        );
         if let Some(reason) = mode_denial {
             return Task::ready(Err(anyhow!("Modo no permitido por la política: {reason}")));
         }
@@ -3149,6 +3142,52 @@ mod tests {
             "the session is back in the allowed mode"
         );
         thread.read_with(cx, |thread, _| assert_eq!(thread.notices().len(), 1));
+    }
+
+    /// Same cases as `consult_only_modes_on_v1_connection`: a forbidden saved default mode
+    /// and a forbidden switch by the agent, decided by one shared policy.
+    #[gpui::test]
+    async fn v2_consult_only_modes_on_v2_connection(cx: &mut TestAppContext) {
+        use settings::AgentConfigOptionValue::ValueId;
+
+        let harness = SessionHarness::new(session_capabilities(), vec![], vec![], cx).await;
+        cx.update(|cx| {
+            acp_thread::policy::ThreadPolicies::register(
+                harness.client.id.clone(),
+                Rc::new(super::super::session_policy::ConsultOnlyModes),
+                cx,
+            )
+        });
+        set_startup_defaults(
+            HashMap::from_iter([("mode".into(), ValueId("full-access".into()))]),
+            cx,
+        );
+        let mut creation = harness.create(cx);
+        harness.new_request(&mut creation, cx).await;
+        harness
+            .new_responses
+            .try_send(Ok(
+                acp::NewSessionResponse::new("session").config_options(mode_options("read-only"))
+            ))
+            .expect("new response");
+        let thread = bounded(creation, cx).await.expect("session");
+        assert!(
+            harness.config_requests.is_empty(),
+            "the forbidden default mode is never sent"
+        );
+
+        harness.send_update(
+            "session",
+            acp::SessionUpdate::ConfigOptionUpdate(acp::ConfigOptionUpdate::new(mode_options(
+                "full-access",
+            ))),
+        );
+        harness.drain_updates(cx).await;
+        let revert = bounded(harness.config_requests.recv(), cx)
+            .await
+            .expect("the agent's switch is reverted");
+        assert_eq!(revert.value, acp::SessionConfigOptionValue::id("read-only"));
+        drop(thread);
     }
 
     #[gpui::test]
