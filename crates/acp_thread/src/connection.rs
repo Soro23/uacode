@@ -1040,6 +1040,7 @@ mod test_support {
         supports_truncate: bool,
         agent_id: AgentId,
         telemetry_id: SharedString,
+        agent_version: Option<SharedString>,
         prompt_capabilities_rx: watch::Receiver<acp_v2::PromptCapabilities>,
     }
 
@@ -1091,6 +1092,7 @@ mod test_support {
                 supports_truncate: true,
                 agent_id: AgentId::new("stub"),
                 telemetry_id: "stub".into(),
+                agent_version: None,
                 prompt_capabilities_rx: watch::Receiver::constant(
                     acp_v2::PromptCapabilities::new()
                         .image(acp_v2::PromptImageCapabilities::new())
@@ -1275,6 +1277,11 @@ mod test_support {
             self
         }
 
+        pub fn with_agent_version(mut self, agent_version: impl Into<SharedString>) -> Self {
+            self.agent_version = Some(agent_version.into());
+            self
+        }
+
         pub fn with_telemetry_id(mut self, telemetry_id: SharedString) -> Self {
             self.telemetry_id = telemetry_id;
             self
@@ -1358,6 +1365,10 @@ mod test_support {
 
         fn telemetry_id(&self) -> SharedString {
             self.telemetry_id.clone()
+        }
+
+        fn agent_version(&self) -> Option<SharedString> {
+            self.agent_version.clone()
         }
 
         fn auth_methods(&self) -> &[acp_v2::AuthMethod] {

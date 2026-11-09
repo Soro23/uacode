@@ -521,6 +521,11 @@ mod tests {
         });
         assert_eq!(selected_option(rejected.await), "reject");
         assert_eq!(policy.pending.borrow().len(), 2);
+
+        // A request that is gone cannot be answered, and the caller learns it.
+        assert!(!thread.update(cx, |thread, cx| {
+            thread.answer_permission_request(request, true, cx)
+        }));
     }
 
     #[test]

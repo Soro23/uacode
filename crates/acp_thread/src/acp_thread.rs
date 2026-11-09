@@ -6889,33 +6889,53 @@ impl AcpThread {
 
     /// Answers a pending request with its one-time allow or reject option, as if the user
     /// had picked it in the thread. Without such an option the request is cancelled.
+    /// Returns `false` when the request is no longer pending in this thread.
     pub fn answer_permission_request(
         &mut self,
         id: PermissionRequestId,
         allow: bool,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let kind = if allow {
             acp_v2::PermissionOptionKind::AllowOnce
         } else {
             acp_v2::PermissionOptionKind::RejectOnce
         };
         let Some(request) = self.permission_requests.get(&id) else {
-            return;
+            log::warn!("Permission request {id:?} is no longer pending in its thread");
+            return false;
         };
         match &request.data {
-            PermissionRequestData::LegacyTool { options, .. } => {
-                match options.first_option_of_kind(kind) {
-                    Some(option) => {
-                        let outcome = SelectedPermissionOutcome::new(
-                            option.option_id.clone(),
-                            option.kind.clone(),
-                        );
+            PermissionRequestData::LegacyTool {
+                options,
+                tool_call_id,
+                ..
+            } => match options.first_option_of_kind(kind) {
+                Some(option) => {
+                    let outcome = SelectedPermissionOutcome::new(
+                        option.option_id.clone(),
+                        option.kind.clone(),
+                    );
+                    let tool_call_points_here = self
+                        .tool_call(tool_call_id)
+                        .is_some_and(|(_, call)| call.authorization_id() == Some(id));
+                    if tool_call_points_here {
                         self.authorize_permission_request(id, outcome, cx);
+                    } else {
+                        // `authorize_permission_request` ignores a request its tool call no
+                        // longer points to, but the agent is still waiting for this answer.
+                        log::warn!(
+                            "Tool call of permission request {id:?} no longer points to it; answering the request directly"
+                        );
+                        self.resolve_permission_request(
+                            id,
+                            RequestPermissionOutcome::Selected(outcome),
+                            cx,
+                        );
                     }
-                    None => self.cancel_permission_request(id, cx),
                 }
-            }
+                None => self.cancel_permission_request(id, cx),
+            },
             PermissionRequestData::Generic { request, .. } => {
                 match request.options.iter().find(|option| option.kind == kind) {
                     Some(option) => {
@@ -6926,6 +6946,7 @@ impl AcpThread {
                 }
             }
         }
+        true
     }
 
     /// A short description of a pending request, for showing it outside the thread.
