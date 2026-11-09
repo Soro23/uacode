@@ -15,8 +15,8 @@ Actualizado: 2026-11-09.
 
 ## Decisiones vigentes
 
-- Todo código nuevo en `crates/office`, con raíz `src/office.rs`; enganches mínimos en Zed y cambios de upstream aislados y comentados por su motivo.
-- No renombrar identificadores internos (`zed::`, crates, `ZED_*`, `.zed/`).
+- UACode es un proyecto independiente y no se sincroniza con Zed upstream (mensaje #10). El código de Zed se modifica cuando es la solución más limpia; la compatibilidad con upstream no es criterio. La lógica de Office vive en `crates/office` (raíz `src/office.rs`), con commits pequeños, tests y comentarios donde el motivo no sea obvio. Las marcas `UACode:` ya no son obligatorias.
+- No renombrar por ahora identificadores internos (`zed::`, crates, `ZED_*`, `.zed/`): coste alto sin beneficio inmediato; se valorará más adelante.
 - Orden: Fase 1 panel/cuentas, 2 roles, 3 worktrees, 4 orquestador.
 - Un proceso por (proveedor, cuenta), varias sesiones por proceso. Adaptadores fijados: Claude 0.94.0, Codex 2.5.0.
 - Roles con ACP `systemPrompt` append; modelo por puesto con `set_config_option` en Fase 2.
@@ -41,7 +41,7 @@ Revisión del paso 5 por Claude y decisión sobre la rama `office-step5-test` (p
 Pendientes conocidos:
 - Paso 6: la política real por puesto (la de prueba deniega todo permiso y escritura, y fija `disallowedTools`, `allowDangerouslySkipPermissions: false` y `settingSources: ["user"]` para Claude).
 - Paso 7: elegir modelo en un hilo de Office escribe `agent_servers.office-…` con `type: registry` y `default_config_options.model` en `settings.json` (confirmado en la prueba del paso 5). El prefijo reservado evita que rompa el agente; el bloqueo llega en el paso 7.
-- Sandbox de Codex en Windows: sin demostrar. En read-only, Codex pidió escalada en vez de intentar escribir, así que la barrera efectiva fue el gancho.
+- **Riesgo abierto:** el sandbox read-only de Codex en Windows no ha quedado demostrado (en el paso 5 Codex pidió escalada en vez de intentar escribir, así que la barrera efectiva fue el gancho). Se vuelve a probar en la Fase 3, cuando workspace-write sea relevante.
 - En codex-acp el único rechazo de un cambio de archivo es la decisión `cancel`, que termina el turno (diseno.md 2.7 prefería no usar `cancel` como rechazo ordinario; aquí no hay alternativa).
 
 ## Reglas de trabajo
@@ -51,7 +51,7 @@ Pendientes conocidos:
 - No escribir fuera del repositorio salvo en `%APPDATA%\UACode` cuando el paso lo requiera, avisando antes. No acceder a cuentas reales para pruebas sin el paso correspondiente.
 - Ciclo de desarrollo debug incremental (`cargo build -p zed`), `cargo check -p office` y `cargo test -p office`; comprobar arranque tras cada paso. Release solo al cerrar hitos o por petición expresa. Registrar tiempos reales de debug.
 - Actualizar este archivo en cada paso con lo hecho, pendiente y decisiones nuevas.
-- AGENTS.md es un enlace simbólico a .rules, adaptado al fork: no añadir avisos de revisión upstream al README; seguir el protocolo del buzón.
+- AGENTS.md es un enlace simbólico a .rules, adaptado a UACode como proyecto independiente: no añadir avisos de revisión upstream al README; seguir el protocolo del buzón.
 - Preferir codebase-memory-mcp para descubrir código. Usar `./script/clippy` si se necesita clippy.
 - La app de prueba se lanza siempre con `--user-data-dir` aislado. No usar computer-use para traer la ventana al frente si eso puede lanzar otra instancia; si ocurre, cerrarla y avisar.
 

@@ -58,9 +58,9 @@ Versiones revisadas: `agent-client-protocol` 5.0.0 (schema 1.15.1), `claude-agen
 | Revisión de rama | `crates/git_ui/src/branch_diff.rs` (`review_diff`, `ReviewBranchDiff`) | Paso de revisión (Fase 3). |
 | `context_server::listener::McpServer` | `crates/context_server/src/listener.rs` | Servidor MCP en proceso, existe pero nadie lo usa (Fase 4). |
 
-### 1.3 Puntos de enganche en código de Zed
+### 1.3 Cambios en código de Zed
 
-Mínimos e imprescindibles:
+UACode es un proyecto independiente y no se sincroniza con Zed upstream (mensaje #10): el código existente se modifica cuando es la solución más limpia, sin añadir capas para evitar tocarlo. La lógica de Office sigue en `crates/office`. Cambios previstos o hechos:
 
 | Fase | Archivo | Cambio |
 | --- | --- | --- |
@@ -74,11 +74,11 @@ Mínimos e imprescindibles:
 | 2 | `crates/acp_thread/src/connection.rs` | Opciones de sesión (`SessionOptions { system_prompt, extra_mcp_servers }`) en `new_session` / `load_session` / `resume_session`, con valor por defecto vacío para no romper a los demás implementadores. |
 | 2 | `crates/agent_servers/src/acp/v1.rs` (~1209) y `v2.rs` (~1296) | Poner `system_prompt` en `NewSessionRequest` (y load/resume) si el agente anuncia `sessionCapabilities.systemPrompt`; añadir `extra_mcp_servers` a los del proyecto (los usa la Fase 4). |
 | 2 | `crates/agent_ui/src/agent_panel.rs` (`CreateThreadOptions`, 935) y `conversation_view.rs` (`initial_state`, 1317) | Llevar `SessionOptions` desde la creación del hilo hasta `new_session`, y guardarlas para reanudar. |
-| 3 | `crates/agent_ui/src/agent_panel.rs`, `thread_metadata_store.rs`, `crates/acp_thread/src/acp_thread.rs` y despacho ACP de terminales en `crates/agent_servers/src/acp/v1.rs` | Tres cambios aislados: respetar los `work_dirs` explícitos, persistirlos y restaurarlos al reanudar, y usarlos para autorizar `fs/*` y como cwd por defecto de `terminal/create`. Comentar el motivo de cada adaptación para facilitar merges con upstream. |
+| 3 | `crates/agent_ui/src/agent_panel.rs`, `thread_metadata_store.rs`, `crates/acp_thread/src/acp_thread.rs` y despacho ACP de terminales en `crates/agent_servers/src/acp/v1.rs` | Tres cambios: respetar los `work_dirs` explícitos, persistirlos y restaurarlos al reanudar, y usarlos para autorizar `fs/*` y como cwd por defecto de `terminal/create`. |
 
 El merge (Fase 3) no toca código de Zed: lo ejecuta `crates/office` con el CLI de git (ver 4.3).
 
-Fuera de esto, todo vive en `crates/office`. Cada cambio en Zed debe ir en un commit aislado para facilitar futuras sincronizaciones con Zed.
+Fuera de esto, todo vive en `crates/office`. Commits pequeños y con tests; comentar el motivo solo cuando no sea obvio.
 
 ## 2. Fase 1: panel y puestos
 
@@ -221,7 +221,7 @@ Además, la política de Office se aplica por sesión a las peticiones ACP, con 
 | --- | --- |
 | `fs/write_text_file` | Fuera del cwd/worktree: rechazar para programadores; para el resto, pedir aprobación. |
 | `terminal/create` | Rechazar push; pedir aprobación desde Office para acciones destructivas; permitir tests a QA y programadores según su política. |
-| `session/request_permission` | Aplicar las reglas de rutas y comandos por rol. Lo ambiguo requiere aprobación. Rechazar con `reject_once` cuando exista, sin usar `cancel` como rechazo ordinario. |
+| `session/request_permission` | Aplicar las reglas de rutas y comandos por rol. Lo ambiguo requiere aprobación. Rechazar con `reject_once` cuando exista, sin usar `cancel` como rechazo ordinario. Excepción aceptada (mensaje #9): en codex-acp 2.5.0 el único `reject_once` de un cambio de archivo es la decisión `cancel`, que termina el turno; no hay alternativa sin cambiar el adaptador. |
 
 Claude usa modo `default`, nunca `bypassPermissions`; durante Fase 1 ninguna escritura o comando se autoaprueba. Las reglas `allow` de la cuenta pueden evitar peticiones ACP. Codex puede ejecutar acciones destructivas dentro del sandbox sin pedir permiso: **el gancho ACP por sí solo no garantiza la aprobación**. En Fase 1 se debe validar una vía efectiva de aprobación para estas operaciones; hasta entonces, bloquear la ejecución de tareas afectadas y mostrar el motivo en Office. No presentar una instrucción de rol ni un detector de comandos como garantía suficiente.
 
@@ -342,7 +342,7 @@ Orden: 0 → 1 → 2 → 3 → 4. Las fases 1 y 2 aportan valor por sí solas. L
 
 | # | Riesgo | Mitigación |
 | --- | --- | --- |
-| R1 | APIs internas de `agent_ui` cambian al sincronizar con Zed (muchas son `pub(crate)` o recientes) | Usar solo API pública (`create_thread_with_options`, `load_agent_thread`, `retained_threads`); cambios en Zed en commits aislados |
+| R1 | APIs internas de `agent_ui` son `pub(crate)` o recientes | Como no hay sincronización con upstream, exponer o ajustar lo necesario en `agent_ui` cuando sea lo más limpio |
 | R2 | `systemPrompt` es *unstable* en ACP: puede cambiar de forma | Append validado en ambos adaptadores; encapsular en `SessionOptions` para cambios futuros |
 | R3 | El estado "sin sesión" vive en `ConversationView` y puede no ser público | Exponer un getter mínimo, o deducirlo de errores de conexión/auth |
 | R4 | Varias sesiones en el mismo proceso del adaptador (puestos con la misma cuenta) | Resuelto en el spike: varias sesiones concurrentes validadas en ambos proveedores |

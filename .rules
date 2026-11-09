@@ -193,5 +193,6 @@ Rules emerge from validated patterns, not one-off observations. The workflow is:
 - Read `docs/office/estado.md` for current status, active decisions and the next authorized step; use `docs/office/diseno.md` for the approved design.
 - Follow the mailbox protocol in `docs/office/buzon/para-codex.md`: execute pending instructions, reply in `para-claude.md`, update `estado.md`, and clear the incoming message. Mailbox files are not committed.
 - Work on `office` with small commits and confirm each step before continuing. Never push or change remotes.
-- Keep new Office code in `crates/office`; minimize upstream changes and preserve internal Zed identifiers.
-- Do not add upstream PR review notices to README.md for this fork.
+- UACode is an independent project and is not synced with Zed upstream. Change existing Zed code when that is the cleanest solution instead of layering around it; upstream compatibility is not a criterion.
+- Keep Office logic in `crates/office`, with small commits, tests, and comments where the reason is not obvious. Do not mass-rename internal Zed identifiers (`zed::`, crates, `ZED_*`, `.zed/`) for now.
+- Do not add upstream PR review notices to README.md.
