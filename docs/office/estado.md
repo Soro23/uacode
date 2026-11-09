@@ -13,7 +13,8 @@ Actualizado: 2026-11-09.
 - Fase 1, paso 4: registro, login y comprobación de cuentas (commits `e5e8ca9371`, `9c1992fc03`, `040f12e913`). Un agente `office-<proveedor>-<id corto>` por cuenta, registrado dinámicamente sin escribir ajustes; «Iniciar sesión» crea la carpeta y lanza el login de suscripción; «Comprobar» sondea `_auth/status_update`. Aprobado en el mensaje #7 tras la prueba de login real del usuario.
 - Fase 1, paso 5: gancho de política (commits `7672740417` en `acp_thread` + `agent_servers`, `b09deb699c` en `office`). `ThreadPolicy` por `AgentId` para permisos, escrituras y terminales del cliente, modo y `_meta` de sesión; Codex de Office arranca en `read-only`. Verificado a mano con prompts reales y una política de prueba en la rama `office-step5-test` (sin fusionar). Aprobado en el mensaje #9.
 - Fase 1, paso 6: política de Office (commits `b889f4f367` y `f5ec3d7830` en `acp_thread`/`agent_servers`, `95f568000e` y `e2178eeb4f` en `office`). Solo consulta para todos los puestos, guarda de versión de adaptador, aprobaciones y bloqueos en la tarjeta del puesto. Verificado a mano. Aprobado en el mensaje #11.
-- Fase 1, paso 7: hilos por puesto (commits `32e385fb09`, `521a13de70`, `17b3083437`, `9cedc971aa`, `5090e52652`, `a73cd5518c`, `80b5ee0dde`). Clic en el resumen de la tarjeta abre o crea el hilo del puesto; enlace puesto → hilo en la base local; política y tarjeta por puesto; «Nuevo hilo» y «Cancelar»; los agentes de Office no leen ni escriben preferencias en settings.json. Verificado a mano salvo un fallo pendiente: «Aprobar»/«Rechazar» de la tarjeta no responden. Pendiente de revisión.
+- Fase 1, paso 7: hilos por puesto (commits `32e385fb09`, `521a13de70`, `17b3083437`, `9cedc971aa`, `5090e52652`, `a73cd5518c`, `80b5ee0dde`). Clic en el resumen de la tarjeta abre o crea el hilo del puesto; enlace puesto → hilo en la base local; política y tarjeta por puesto; «Nuevo hilo» y «Cancelar»; los agentes de Office no leen ni escriben preferencias en settings.json. Aprobado en el mensaje #12 salvo el fallo de «Aprobar»/«Rechazar», tratado en el paso 8.
+- Fase 1, paso 8: estado y mensajes del puesto (commits `a160906647`, `3bf14eedf4`, `edbc7018e6`, `2631087fe6`, `ad735dd35f`, `d7b4990341`). Test de UI de «Aprobar»/«Rechazar» y respuestas sin fallos silenciosos; estados Requiere login, Error, Esperando aprobación, Trabajando y Libre; tarea actual y último mensaje con refresco limitado; título del puesto en el hilo nuevo; adaptadores v1 muertos al cerrar. Pendiente de revisión.
 
 ## Decisiones vigentes
 
@@ -38,13 +39,13 @@ Actualizado: 2026-11-09.
 
 ## Siguiente paso
 
-Revisión del paso 7 por Claude y decisión sobre el fallo de «Aprobar»/«Rechazar» en la tarjeta.
+Revisión del paso 8 por Claude y decisión sobre la propuesta de disco (en `para-claude.md`, sin aplicar).
 
 Pendientes conocidos:
-- **Fallo abierto (paso 7):** «Aprobar» y «Rechazar» de la tarjeta no responden; «Cancelar», en la misma tarjeta, sí. En el paso 6 «Aprobar» funcionaba. El test de integración `pending_permission_answered_outside_the_thread_reaches_the_agent` (secuencia de Claude por v1, respuesta con `answer_permission_request`) pasa, así que el fallo está entre el botón de la tarjeta y el hilo en Office. Aitor decidió no gastar más prompts en la prueba; localizarlo necesita trazas y 1–2 prompts con una petición pendiente. Mientras tanto la petición se puede responder en el hilo.
-- El título del puesto no se aplica al hilo nuevo: la tarjeta muestra «Hilo: New Agent Thread» hasta el primer mensaje, después el título del hilo.
+- «Aprobar»/«Rechazar» en la app: el test de UI con clic real pasa, así que la causa del fallo del paso 7 no se reprodujo. Los caminos sospechosos ya no fallan en silencio (warn en el log y la entrada sale de la tarjeta). Si se repite, el log dirá cuál de los dos avisos salta.
+- Un hilo vacío creado con «Nuevo hilo» pierde el título al reiniciar UACode: el borrador restaurado vuelve a «New Agent Thread» y su fila en `sidebar_threads` queda con título vacío. Hipótesis sin comprobar: el adaptador manda `session_info_update` con título nulo al crear la sesión restaurada y pisa el título pedido. Con el primer mensaje el hilo recibe su título normal.
 - Las entradas `agent_servers.office-*` que quedaron en el `settings.json` aislado de las pruebas (modo y modelo por defecto) no se borran: Office las ignora porque sus agentes no leen preferencias guardadas.
-- Tras cerrar UACode, los procesos de los adaptadores tardan 30–40 s en terminar; después no queda ninguno.
+- «Trabajando» y «Esperando aprobación» solo están comprobados por tests; no se han visto en vivo porque requieren un prompt.
 - Las builds debug activan `acp-beta` (flags de equipo activos en debug) y Codex usa ACP v2; en release usaría v1. Las decisiones de política de sesión (inicio, modo por defecto, cambio del usuario y del agente) viven en `crates/agent_servers/src/acp/session_policy.rs` y v1 y v2 las llaman igual; los tests `consult_only_modes_on_v1_connection` y `v2_consult_only_modes_on_v2_connection` comprueban los mismos casos en ambas rutas.
 - **Riesgo abierto:** el sandbox read-only de Codex en Windows no ha quedado demostrado (en el paso 5 Codex pidió escalada en vez de intentar escribir, así que la barrera efectiva fue el gancho). Se vuelve a probar en la Fase 3, cuando workspace-write sea relevante.
 - En codex-acp el único rechazo de un cambio de archivo es la decisión `cancel`, que termina el turno (diseno.md 2.7 prefería no usar `cancel` como rechazo ordinario; aquí no hay alternativa).
@@ -169,5 +170,18 @@ Pendientes conocidos:
   - Fallo: «Aprobar»/«Rechazar» de la tarjeta no responden (ver pendientes). Un primer intento con la tarjeta entera clicable se tragaba los clics; se corrigió en `a73cd5518c`, pero el fallo siguió.
   - «Nuevo hilo» no se probó con prompt; usa la misma ruta de creación que el primer clic.
 - Disco: la compilación agotó el disco D; se borró solo `target\debug\incremental` (98,5 GB de caché regenerable).
+
+- 2026-11-09, mensaje #12: paso 7 aprobado salvo el fallo de la tarjeta; paso 8 implementado. Ver «Verificación del paso 8».
+
+## Verificación del paso 8
+
+- Test de UI `approving_and_rejecting_from_the_card_answer_the_thread` (OfficePanel en `VisualTestContext`, hilo sobre `StubAgentConnection` con agente `office-claude-default` 0.94.0, `PolicyEvent::Pending` real, `simulate_click` sobre `.debug_selector`): verde a la primera. El clic llega; la causa del fallo en la app no se reprodujo.
+- Robustez (`a160906647`, `3bf14eedf4`): `answer_permission_request` devuelve `bool` y avisa con `log::warn`; una petición legacy cuya tool call ya no apunta a ella se resuelve directamente; la tarjeta quita la entrada si no se pudo responder, si la petición desaparece del hilo (cancelada, turno cancelado) o con «Nuevo hilo». Tests `a_request_cancelled_in_the_thread_leaves_the_card` y `an_unanswerable_approval_is_removed_from_the_card`.
+- Estado del puesto (`ad735dd35f`, `post_activity.rs`): Requiere login > Error > Esperando aprobación > Trabajando > Libre; tarea actual (paso del plan en curso o tool call activa) y último mensaje del agente, truncados a 140 caracteres; refresco como máximo cada 500 ms y solo si cambia. Test `cards_show_state_and_last_message_with_limited_refresh`.
+- Título (`edbc7018e6`, `d7b4990341`): `CreateThreadOptions` aplica el título desde la creación; la cabecera del panel de agente muestra el título de un hilo vacío en vez de «New … Thread».
+- Cierre (`2631087fe6`): la conexión ACP v1 no implementaba `shutdown()` y el adaptador vivía hasta que se soltaba la última referencia. Ahora suelta el hijo y el job object mata el árbol. Con Claude y Codex abiertos colgaban 8 procesos de `uacode.exe`; a los 3–5 s de cerrar no quedaba ninguno.
+- Prueba manual sin prompts (datos aislados): tarjetas con «Libre» y último mensaje; «Nuevo hilo» en «Consulta Codex» con título en tarjeta y cabecera; cierre limpio dos veces. Encontrado el título perdido del borrador al reiniciar (ver pendientes).
+- Tests: `acp_thread` 311, `agent_servers` 191, `agent_ui` 586, `office` 44. Clippy sin avisos.
+- Disco: `target/debug` 112 GB (incremental 46,8, deps 59, build 4,1). Propuesta en el buzón, sin aplicar.
 
 - 2026-11-09, mensaje #7: paso 4 aprobado. Regla nueva sobre instancias de prueba. Paso 5 aprobado en dos fases; entregado el diseño de la Fase A (puntos de permiso, escritura, terminal y modo; interfaz `ThreadPolicy` por `AgentId`; límites de cada adaptador leídos en su código fijado).
