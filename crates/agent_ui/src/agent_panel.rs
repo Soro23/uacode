@@ -6204,10 +6204,18 @@ impl AgentPanel {
             .justify_between();
 
         let empty_thread_title = matches!(mode, ToolbarMode::EmptyThread).then(|| {
-            Label::new(format!("New {} Thread", selected_agent_label))
-                .color(Color::Muted)
-                .truncate()
-                .into_any_element()
+            // Threads created with a title (for example from an Office post) show it from
+            // the start instead of the generic placeholder.
+            let requested_title = self
+                .active_agent_thread(cx)
+                .and_then(|thread| thread.read(cx).title());
+            Label::new(
+                requested_title
+                    .unwrap_or_else(|| format!("New {} Thread", selected_agent_label).into()),
+            )
+            .color(Color::Muted)
+            .truncate()
+            .into_any_element()
         });
 
         let toolbar_content = {
