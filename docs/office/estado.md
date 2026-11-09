@@ -12,7 +12,8 @@ Actualizado: 2026-11-09.
 - Fase 1, paso 3: catálogo global de cuentas en `accounts.json` (commit `15beb0e1aa`). Alta con nombre único por proveedor, entradas virtuales «Por defecto», importación explícita de carpetas existentes y selector de cuenta en el puesto. Todas las cuentas «Sin probar».
 - Fase 1, paso 4: registro, login y comprobación de cuentas (commits `e5e8ca9371`, `9c1992fc03`, `040f12e913`). Un agente `office-<proveedor>-<id corto>` por cuenta, registrado dinámicamente sin escribir ajustes; «Iniciar sesión» crea la carpeta y lanza el login de suscripción; «Comprobar» sondea `_auth/status_update`. Aprobado en el mensaje #7 tras la prueba de login real del usuario.
 - Fase 1, paso 5: gancho de política (commits `7672740417` en `acp_thread` + `agent_servers`, `b09deb699c` en `office`). `ThreadPolicy` por `AgentId` para permisos, escrituras y terminales del cliente, modo y `_meta` de sesión; Codex de Office arranca en `read-only`. Verificado a mano con prompts reales y una política de prueba en la rama `office-step5-test` (sin fusionar). Aprobado en el mensaje #9.
-- Fase 1, paso 6: política de Office (commits `b889f4f367` y `f5ec3d7830` en `acp_thread`/`agent_servers`, `95f568000e` y `e2178eeb4f` en `office`). Solo consulta para todos los puestos, guarda de versión de adaptador, aprobaciones y bloqueos en la tarjeta del puesto. Verificado a mano. Pendiente de revisión.
+- Fase 1, paso 6: política de Office (commits `b889f4f367` y `f5ec3d7830` en `acp_thread`/`agent_servers`, `95f568000e` y `e2178eeb4f` en `office`). Solo consulta para todos los puestos, guarda de versión de adaptador, aprobaciones y bloqueos en la tarjeta del puesto. Verificado a mano. Aprobado en el mensaje #11.
+- Fase 1, paso 7: hilos por puesto (commits `32e385fb09`, `521a13de70`, `17b3083437`, `9cedc971aa`, `5090e52652`, `a73cd5518c`, `80b5ee0dde`). Clic en el resumen de la tarjeta abre o crea el hilo del puesto; enlace puesto → hilo en la base local; política y tarjeta por puesto; «Nuevo hilo» y «Cancelar»; los agentes de Office no leen ni escriben preferencias en settings.json. Verificado a mano salvo un fallo pendiente: «Aprobar»/«Rechazar» de la tarjeta no responden. Pendiente de revisión.
 
 ## Decisiones vigentes
 
@@ -37,11 +38,13 @@ Actualizado: 2026-11-09.
 
 ## Siguiente paso
 
-Revisión del paso 6 por Claude. Después se borra la rama `office-step5-test` (mensaje #9).
+Revisión del paso 7 por Claude y decisión sobre el fallo de «Aprobar»/«Rechazar» en la tarjeta.
 
 Pendientes conocidos:
-- Los hilos aún no están ligados a puestos: la tarjeta muestra aprobaciones y bloqueos del agente de su cuenta, así que dos puestos con la misma cuenta ven lo mismo. Se resuelve cuando Office abra los hilos de cada puesto (sesión → puesto); la política ya busca sus reglas por hilo (`rules_for`).
-- Paso 7: elegir modelo o modo en un hilo de Office escribe `agent_servers.office-…` con `type: registry` y `default_config_options` en `settings.json` (confirmado en los pasos 5 y 6; quedó `"mode": "agent-full-access"` en los datos aislados por el fallo v2 ya corregido). La política rechaza un modo por defecto no permitido, pero el bloqueo de esas escrituras llega en el paso 7.
+- **Fallo abierto (paso 7):** «Aprobar» y «Rechazar» de la tarjeta no responden; «Cancelar», en la misma tarjeta, sí. En el paso 6 «Aprobar» funcionaba. El test de integración `pending_permission_answered_outside_the_thread_reaches_the_agent` (secuencia de Claude por v1, respuesta con `answer_permission_request`) pasa, así que el fallo está entre el botón de la tarjeta y el hilo en Office. Aitor decidió no gastar más prompts en la prueba; localizarlo necesita trazas y 1–2 prompts con una petición pendiente. Mientras tanto la petición se puede responder en el hilo.
+- El título del puesto no se aplica al hilo nuevo: la tarjeta muestra «Hilo: New Agent Thread» hasta el primer mensaje, después el título del hilo.
+- Las entradas `agent_servers.office-*` que quedaron en el `settings.json` aislado de las pruebas (modo y modelo por defecto) no se borran: Office las ignora porque sus agentes no leen preferencias guardadas.
+- Tras cerrar UACode, los procesos de los adaptadores tardan 30–40 s en terminar; después no queda ninguno.
 - Las builds debug activan `acp-beta` (flags de equipo activos en debug) y Codex usa ACP v2; en release usaría v1. Las decisiones de política de sesión (inicio, modo por defecto, cambio del usuario y del agente) viven en `crates/agent_servers/src/acp/session_policy.rs` y v1 y v2 las llaman igual; los tests `consult_only_modes_on_v1_connection` y `v2_consult_only_modes_on_v2_connection` comprueban los mismos casos en ambas rutas.
 - **Riesgo abierto:** el sandbox read-only de Codex en Windows no ha quedado demostrado (en el paso 5 Codex pidió escalada en vez de intentar escribir, así que la barrera efectiva fue el gancho). Se vuelve a probar en la Fase 3, cuando workspace-write sea relevante.
 - En codex-acp el único rechazo de un cambio de archivo es la decisión `cancel`, que termina el turno (diseno.md 2.7 prefería no usar `cancel` como rechazo ordinario; aquí no hay alternativa).
@@ -149,5 +152,22 @@ Pendientes conocidos:
 - Fallo encontrado en la prueba y corregido (`f5ec3d7830`): en debug Codex usa ACP v2 y el modo no pasaba por la política (se pudo poner «Full access»; se devolvió a Read-only sin enviar prompts). Recomprobado tras la corrección.
 - Maquetación (`e2178eeb4f`): títulos y motivos largos dejaban los botones fuera de la tarjeta; ahora van truncados y con los botones en su propia fila.
 - Prompts: 3 a Claude (b, c y lectura de aprobación) y 1 a Codex. Sin procesos huérfanos al cerrar.
+
+- 2026-11-09, mensaje #11: paso 6 aprobado; rama `office-step5-test` borrada; política de sesión centralizada; paso 7 implementado. Ver «Verificación del paso 7».
+
+## Verificación del paso 7
+
+- Centralización (`32e385fb09`): decisiones de inicio de sesión, modo por defecto, cambio del usuario y del agente en `acp/session_policy.rs`; v1 comprueba también cambios de modo por opción de configuración cuando la sesión no tiene modos heredados. Tests `consult_only_modes_on_v1_connection` (con control: sin política el modo por defecto sí se aplica) y `v2_consult_only_modes_on_v2_connection`.
+- Preferencias (`521a13de70`, `17b3083437`): `ThreadPolicy::uses_saved_preferences`; para los agentes de Office no se leen ni escriben modo, modelo, opciones por defecto ni favoritos en settings.json (lecturas y escrituras de `CustomAgentServer` y valores por defecto de v1 y v2). Test con FakeFs y control con un agente normal.
+- Hilos por puesto (`9cedc971aa`, `5090e52652`, `a73cd5518c`): `post_threads.rs` guarda puesto → hilo en la base local (`office-post-thread:<carpeta del proyecto>:<id de puesto>`), nunca en office.json; sesión → hilo → puesto con `ThreadMetadataStore::entry_by_session`. La política resuelve el puesto en `rules_for` y sus eventos llevan el puesto; los hilos fuera de puestos tienen las reglas de Fase 1 y no salen en ninguna tarjeta. Si el puesto cambió de cuenta, se crea un hilo nuevo con el agente nuevo.
+- Tests: `acp_thread` 311, `agent_servers` 191, `office` 38. Clippy sin avisos. Un test inestable del paso 4 (orden del id aleatorio) corregido en `6f0c6e0e55`.
+- Prueba manual (datos aislados, proyecto desechable, 3 prompts; registro en `target\office-step5-test\registro.md`):
+  - Dos puestos con la misma cuenta (Claude · Por defecto): cada clic creó su propio hilo; la lectura pendiente del puesto «Revisión Claude» apareció solo en su tarjeta.
+  - Reinicio: ambas tarjetas conservan su hilo y cada clic abre su historial.
+  - «Cancelar» desde la tarjeta detuvo el turno en curso.
+  - Elegir modelo (Haiku) y cambiar de modo (Plan → Manual) en hilos de Office: settings.json con el mismo hash al empezar y al terminar. Un hilo nuevo vuelve a mostrar el modelo por defecto (las preferencias no se guardan).
+  - Fallo: «Aprobar»/«Rechazar» de la tarjeta no responden (ver pendientes). Un primer intento con la tarjeta entera clicable se tragaba los clics; se corrigió en `a73cd5518c`, pero el fallo siguió.
+  - «Nuevo hilo» no se probó con prompt; usa la misma ruta de creación que el primer clic.
+- Disco: la compilación agotó el disco D; se borró solo `target\debug\incremental` (98,5 GB de caché regenerable).
 
 - 2026-11-09, mensaje #7: paso 4 aprobado. Regla nueva sobre instancias de prueba. Paso 5 aprobado en dos fases; entregado el diseño de la Fase A (puntos de permiso, escritura, terminal y modo; interfaz `ThreadPolicy` por `AgentId`; límites de cada adaptador leídos en su código fijado).
