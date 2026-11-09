@@ -9527,6 +9527,111 @@ exit 7
             .expect("foreground dispatch after EOF");
     }
 
+    #[derive(Default)]
+    struct PendingRecorder {
+        pending: RefCell<Vec<acp_thread::PermissionRequestId>>,
+    }
+
+    impl acp_thread::policy::ThreadPolicy for PendingRecorder {
+        fn decide(
+            &self,
+            _: &PolicyContext,
+            _: &PolicyRequest,
+            _: &App,
+        ) -> acp_thread::policy::PolicyDecision {
+            acp_thread::policy::PolicyDecision::AskUser
+        }
+
+        fn permission_pending(
+            &self,
+            _: &PolicyContext,
+            _: WeakEntity<AcpThread>,
+            request: acp_thread::PermissionRequestId,
+            _: &App,
+        ) {
+            self.pending.borrow_mut().push(request);
+        }
+    }
+
+    /// The sequence claude-agent-acp uses for a read outside the project: the tool call is
+    /// announced first, then permission is requested with its three options. Answering the
+    /// pending request from outside the thread must reach the agent.
+    #[gpui::test]
+    async fn pending_permission_answered_outside_the_thread_reaches_the_agent(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (agent_sender, agent_receiver) = futures::channel::oneshot::channel();
+        let (connection, project, _, _, _, _, _keep_agent_alive) =
+            connect_fake_agent_with_handle(None, Some(agent_sender), cx).await;
+        let agent = agent_receiver.await.expect("fake agent handle");
+        let policy = Rc::new(PendingRecorder::default());
+        cx.update(|cx| ThreadPolicies::register(connection.id.clone(), policy.clone(), cx));
+        let session_id = acp_v2::SessionId::new("permission-session");
+        let thread = cx
+            .update(|cx| {
+                connection.clone().load_session(
+                    session_id.clone(),
+                    project,
+                    PathList::new(&[std::path::Path::new("/a")]),
+                    None,
+                    cx,
+                )
+            })
+            .await
+            .expect("load permission session");
+
+        for allow in [false, true] {
+            let tool_id = format!("read-outside-{allow}");
+            agent
+                .send_notification(acp::SessionNotification::new(
+                    acp::SessionId::new(session_id.0.clone()),
+                    acp::SessionUpdate::ToolCall(
+                        acp::ToolCall::new(acp::ToolCallId::new(tool_id.clone()), "Read fuera.txt")
+                            .kind(acp::ToolKind::Read)
+                            .status(acp::ToolCallStatus::Pending),
+                    ),
+                ))
+                .expect("tool call");
+            let response = agent.send_request(acp::RequestPermissionRequest::new(
+                acp::SessionId::new(session_id.0.clone()),
+                acp::ToolCallUpdate::new(
+                    acp::ToolCallId::new(tool_id),
+                    acp::ToolCallUpdateFields::default().title("Read fuera.txt"),
+                ),
+                vec![
+                    acp::PermissionOption::new(
+                        "allow",
+                        "Yes",
+                        acp::PermissionOptionKind::AllowOnce,
+                    ),
+                    acp::PermissionOption::new(
+                        "allow_always",
+                        "Yes, during this session",
+                        acp::PermissionOptionKind::AllowAlways,
+                    ),
+                    acp::PermissionOption::new(
+                        "reject",
+                        "No",
+                        acp::PermissionOptionKind::RejectOnce,
+                    ),
+                ],
+            ));
+            cx.run_until_parked();
+            let request = *policy.pending.borrow().last().expect("pending request");
+            thread.update(cx, |thread, cx| {
+                thread.answer_permission_request(request, allow, cx)
+            });
+            cx.run_until_parked();
+            let outcome = response.block_task().await.expect("permission response");
+            assert_eq!(
+                outcome.outcome,
+                acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(
+                    if allow { "allow" } else { "reject" }
+                ))
+            );
+        }
+    }
+
     #[gpui::test]
     async fn test_permission_rpc_cancellation_does_not_cancel_successor(
         cx: &mut gpui::TestAppContext,
