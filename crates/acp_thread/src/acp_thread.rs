@@ -6867,6 +6867,18 @@ impl AcpThread {
         )
     }
 
+    /// Why the agent's policy refuses switching this session to `mode`, if it does.
+    pub fn mode_change_denial(
+        &self,
+        mode: &str,
+        origin: policy::ModeChangeOrigin,
+        cx: &App,
+    ) -> Option<SharedString> {
+        let decision =
+            self.policy_decision(&policy::PolicyRequest::SetMode { mode, origin }, cx)?;
+        (!decision.allows_mode_change(origin)).then(|| decision.denial_reason())
+    }
+
     /// Tells the agent's policy, if any, that a request is waiting for the user.
     fn notify_policy_pending(&self, id: PermissionRequestId, cx: &mut Context<Self>) {
         let agent_id = self.connection.agent_id();

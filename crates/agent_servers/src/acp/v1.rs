@@ -3,8 +3,9 @@ use super::{
     ForegroundWork, ReadOnlyConfigOptions, UnsupportedVersion, apply_subagent_update,
     drain_foreground_queue, enqueue_notification, enqueue_request, first_class_terminal_auth_task,
     handle_v2_complete_elicitation, handle_v2_create_elicitation, map_acp_error,
-    mcp_configurations_for_project, respond_err, respond_result, runtime, session_thread,
-    terminal_auth_task_id, transport, with_v2_client_ingress, work_dirs_from_session_info,
+    mcp_configurations_for_project, mode_option_value, respond_err, respond_result, runtime,
+    session_thread, terminal_auth_task_id, transport, with_v2_client_ingress,
+    work_dirs_from_session_info,
 };
 use acp_thread::policy::{ModeChangeOrigin, PolicyContext, PolicyRequest, ThreadPolicies};
 use acp_thread::{
@@ -7464,6 +7465,53 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn policy_refuses_denied_mode_config_option(cx: &mut gpui::TestAppContext) {
+        use acp_thread::AgentSessionConfigOptions;
+
+        let (connection, requests) = connect_config_defaults_test_agent(cx).await;
+        let config = ConfigOptions::new(Rc::new(RefCell::new(vec![
+            acp_v2::SessionConfigOption::select(
+                "mode",
+                "Mode",
+                "read-only",
+                vec![
+                    acp_v2::SessionConfigSelectOption::new("read-only", "Read-only"),
+                    acp_v2::SessionConfigSelectOption::new("bypassPermissions", "Full access"),
+                ],
+            )
+            .category(acp_v2::SessionConfigOptionCategory::Mode),
+        ])));
+        let options = AcpSessionConfigOptions {
+            agent_id: AgentId::new("policy-config-test"),
+            agent_version: None,
+            session_id: acp_v2::SessionId::new("session"),
+            connection: connection.connection.clone(),
+            config_options: config,
+        };
+        cx.update(|cx| {
+            ThreadPolicies::register(
+                AgentId::new("policy-config-test"),
+                Rc::new(TestPolicy {
+                    session_meta: None,
+                    refusal: None,
+                    denied_mode: "bypassPermissions",
+                }),
+                cx,
+            )
+        });
+        cx.update(|cx| {
+            options.set_config_option(
+                "mode".into(),
+                acp_v2::SessionConfigOptionValue::id("bypassPermissions"),
+                cx,
+            )
+        })
+        .await
+        .expect_err("the policy refuses the mode");
+        assert!(requests.lock().expect("requests").is_empty());
+    }
+
+    #[gpui::test]
     async fn shared_config_values_use_v1_wire_shapes(cx: &mut gpui::TestAppContext) {
         use acp_thread::AgentSessionConfigOptions;
 
@@ -10590,22 +10638,6 @@ fn mode_change_allowed(
             log::info!("Mode `{mode}` refused by the agent's policy: {reason}");
             false
         }
-    }
-}
-
-fn mode_option_value<'a>(
-    option: &acp_v2::SessionConfigOption,
-    value: &'a acp_v2::SessionConfigOptionValue,
-) -> Option<&'a str> {
-    if !matches!(
-        option.category,
-        Some(acp_v2::SessionConfigOptionCategory::Mode)
-    ) {
-        return None;
-    }
-    match value {
-        acp_v2::SessionConfigOptionValue::Id { value } => Some(value.0.as_ref()),
-        _ => None,
     }
 }
 
