@@ -257,6 +257,70 @@ impl OfficePanel {
         }
     }
 
+    /// Requests waiting for a person and the latest denial on the post's account.
+    fn render_policy_state(&self, post: &Post, cx: &mut Context<Self>) -> AnyElement {
+        let accounts = self.accounts.read(cx);
+        let approvals = accounts.post_pending_approvals(post);
+        let notice = accounts.post_policy_notice(post);
+        let mut state = v_flex().gap_1();
+        if !approvals.is_empty() {
+            state = state.child(
+                Label::new(format!("Esperando aprobación ({})", approvals.len()))
+                    .color(Color::Warning),
+            );
+        }
+        for (index, (request, title)) in approvals.into_iter().enumerate() {
+            let element_id =
+                |action: &str| -> SharedString { format!("{action}-{}-{index}", post.id).into() };
+            state =
+                state.child(
+                    h_flex()
+                        .gap_2()
+                        .child(Label::new(title).size(LabelSize::Small))
+                        .child(
+                            Button::new(element_id("approve"), "Aprobar").on_click(cx.listener(
+                                move |panel, _, _, cx| {
+                                    panel.accounts.update(cx, |accounts, cx| {
+                                        accounts.answer_approval(request, true, cx)
+                                    })
+                                },
+                            )),
+                        )
+                        .child(Button::new(element_id("reject"), "Rechazar").on_click(
+                            cx.listener(move |panel, _, _, cx| {
+                                panel.accounts.update(cx, |accounts, cx| {
+                                    accounts.answer_approval(request, false, cx)
+                                })
+                            }),
+                        )),
+                );
+        }
+        if let Some(notice) = notice {
+            let dismissed = post.clone();
+            state = state.child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Label::new(format!("Bloqueado: {notice}"))
+                            .size(LabelSize::Small)
+                            .color(Color::Error),
+                    )
+                    .child(
+                        Button::new(
+                            SharedString::from(format!("dismiss-notice-{}", post.id)),
+                            "Descartar",
+                        )
+                        .on_click(cx.listener(move |panel, _, _, cx| {
+                            panel.accounts.update(cx, |accounts, cx| {
+                                accounts.dismiss_policy_notice(&dismissed, cx)
+                            })
+                        })),
+                    ),
+            );
+        }
+        state.into_any_element()
+    }
+
     fn account_label(&self, post: &Post, cx: &App) -> String {
         match self.accounts.read(cx).document() {
             Some(document) => document.resolve(post).label(),
@@ -559,6 +623,7 @@ impl Render for OfficePanel {
                             None => format!("Sin hilo · Cuenta: {account}"),
                         }
                     }))
+                    .children((!post.archived).then(|| self.render_policy_state(&post, cx)))
                     .child(Label::new(if post.model.is_empty() {
                         "Modelo: por defecto".into()
                     } else {

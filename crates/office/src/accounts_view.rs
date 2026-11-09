@@ -3,17 +3,20 @@ use crate::{
     account_login,
     accounts::{self, AccountChoice, AccountsDocument, AccountsFile, ImportReport, default_folder},
     auth_status::{self, AuthStatus},
+    office_policy::PolicyEvent,
     office_store::{Post, Provider},
     versioned_file,
 };
+use acp_thread::{AcpThread, AcpThreadEvent, PermissionRequestId};
 use anyhow::{Context as _, Result};
 use collections::HashMap;
 use fs::Fs;
-use futures::StreamExt as _;
+use futures::{StreamExt as _, channel::mpsc};
 use gpui::{
-    AsyncApp, Context, Entity, Focusable as _, IntoElement, Render, Task, WeakEntity, Window,
+    AsyncApp, Context, Entity, Focusable as _, IntoElement, Render, Subscription, Task, WeakEntity,
+    Window,
 };
-use project::Project;
+use project::{AgentId, Project};
 use std::{collections::VecDeque, path::PathBuf, sync::Arc};
 use time::OffsetDateTime;
 use ui::prelude::*;
@@ -93,6 +96,15 @@ impl AccountStatus {
 }
 
 /// Global account catalog editor shown inside the Office panel.
+/// A permission request Office's policy left to a person, shown on the posts of its account.
+struct PendingApproval {
+    agent_id: AgentId,
+    request: PermissionRequestId,
+    title: String,
+    thread: WeakEntity<AcpThread>,
+    _subscription: Subscription,
+}
+
 pub struct AccountsView {
     workspace: WeakEntity<Workspace>,
     project: WeakEntity<Project>,
@@ -112,6 +124,11 @@ pub struct AccountsView {
     // Dropping a task kills its adapter process, so removing an entry stops it.
     probes: HashMap<AccountKey, Task<()>>,
     logins: HashMap<AccountKey, Task<()>>,
+    policy_events: mpsc::UnboundedSender<PolicyEvent>,
+    /// The latest denial or block for each agent, until the user dismisses it.
+    policy_notices: HashMap<AgentId, SharedString>,
+    pending_approvals: Vec<PendingApproval>,
+    _policy_events_task: Task<()>,
     _load_task: Task<()>,
     _save_task: Task<()>,
 }
@@ -128,6 +145,17 @@ impl AccountsView {
             }
         })
         .detach();
+        let (policy_events, mut policy_receiver) = mpsc::unbounded();
+        let policy_events_task = cx.spawn(async move |this, cx| {
+            while let Some(event) = policy_receiver.next().await {
+                if this
+                    .update(cx, |view, cx| view.handle_policy_event(event, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
         let mut view = Self {
             workspace,
             project,
@@ -146,6 +174,10 @@ impl AccountsView {
             probe_queue: VecDeque::default(),
             probes: HashMap::default(),
             logins: HashMap::default(),
+            policy_events,
+            policy_notices: HashMap::default(),
+            pending_approvals: Vec::new(),
+            _policy_events_task: policy_events_task,
             _load_task: Task::ready(()),
             _save_task: Task::ready(()),
         };
@@ -159,19 +191,115 @@ impl AccountsView {
 
     /// Status of the account a post uses, or `None` when the account is missing.
     pub fn post_status_label(&self, post: &Post) -> Option<String> {
-        let document = self.document()?;
-        let key = match document.resolve(post) {
-            AccountChoice::Default => AccountKey {
+        let key = self.post_account_key(post)?;
+        Some(self.status(&key).label())
+    }
+
+    /// The Office agent a post's threads run on, or `None` when its account is missing.
+    fn post_agent_id(&self, post: &Post) -> Option<&AgentId> {
+        let key = self.post_account_key(post)?;
+        self.agents.get(&key).map(|agent| &agent.agent_id)
+    }
+
+    fn post_account_key(&self, post: &Post) -> Option<AccountKey> {
+        match self.document()?.resolve(post) {
+            AccountChoice::Default => Some(AccountKey {
                 provider: post.provider,
                 account_id: None,
-            },
-            AccountChoice::Account(account) => AccountKey {
+            }),
+            AccountChoice::Account(account) => Some(AccountKey {
                 provider: post.provider,
                 account_id: Some(account.id.clone()),
-            },
-            AccountChoice::Missing => return None,
+            }),
+            AccountChoice::Missing => None,
+        }
+    }
+
+    // Threads are not linked to posts yet: a post shows what happens on its account's agent.
+    pub fn post_policy_notice(&self, post: &Post) -> Option<SharedString> {
+        self.policy_notices.get(self.post_agent_id(post)?).cloned()
+    }
+
+    pub fn post_pending_approvals(&self, post: &Post) -> Vec<(PermissionRequestId, String)> {
+        let Some(agent_id) = self.post_agent_id(post) else {
+            return Vec::new();
         };
-        Some(self.status(&key).label())
+        self.pending_approvals
+            .iter()
+            .filter(|pending| &pending.agent_id == agent_id)
+            .map(|pending| (pending.request, pending.title.clone()))
+            .collect()
+    }
+
+    pub fn dismiss_policy_notice(&mut self, post: &Post, cx: &mut Context<Self>) {
+        if let Some(agent_id) = self.post_agent_id(post).cloned() {
+            self.policy_notices.remove(&agent_id);
+            cx.notify();
+        }
+    }
+
+    /// Answers a pending request from the panel, as the user would in the thread.
+    pub fn answer_approval(
+        &mut self,
+        request: PermissionRequestId,
+        allow: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pending) = self
+            .pending_approvals
+            .iter()
+            .find(|pending| pending.request == request)
+        else {
+            return;
+        };
+        match pending.thread.upgrade() {
+            Some(thread) => thread.update(cx, |thread, cx| {
+                thread.answer_permission_request(request, allow, cx)
+            }),
+            None => {
+                self.pending_approvals
+                    .retain(|pending| pending.request != request);
+                cx.notify();
+            }
+        }
+    }
+
+    fn handle_policy_event(&mut self, event: PolicyEvent, cx: &mut Context<Self>) {
+        match event {
+            PolicyEvent::Denied { agent_id, reason } => {
+                self.policy_notices.insert(agent_id, reason);
+            }
+            PolicyEvent::Pending {
+                agent_id,
+                thread,
+                request,
+            } => {
+                let Some(thread) = thread.upgrade() else {
+                    return;
+                };
+                // Answered in the thread before this event arrived.
+                let Some(title) = thread.read(cx).permission_request_title(request, cx) else {
+                    return;
+                };
+                let subscription = cx.subscribe(&thread, move |view, _, event, cx| {
+                    if let AcpThreadEvent::ToolAuthorizationReceived(id) = event
+                        && *id == request
+                    {
+                        view.pending_approvals
+                            .retain(|pending| pending.request != request);
+                        cx.notify();
+                    }
+                });
+                self.pending_approvals.push(PendingApproval {
+                    agent_id,
+                    request,
+                    title,
+                    thread: thread.downgrade(),
+                    _subscription: subscription,
+                });
+            }
+        }
+        cx.notify();
     }
 
     fn status(&self, key: &AccountKey) -> &AccountStatus {
@@ -215,18 +343,22 @@ impl AccountsView {
             return;
         }
         let agents = account_agents::account_agents(document, &self.credentials_root);
-        match self.agents.sync(agents, &project, cx) {
+        match self.agents.sync(agents, &project, &self.policy_events, cx) {
             Ok(removed) => {
                 self.agents_error = None;
                 for agent in removed {
-                    self.forget_account(&agent.key);
+                    self.forget_agent(&agent);
                 }
             }
             Err(error) => self.agents_error = Some(format!("{error:#}")),
         }
     }
 
-    fn forget_account(&mut self, key: &AccountKey) {
+    fn forget_agent(&mut self, agent: &AccountAgent) {
+        self.policy_notices.remove(&agent.agent_id);
+        self.pending_approvals
+            .retain(|pending| pending.agent_id != agent.agent_id);
+        let key = &agent.key;
         self.statuses.remove(key);
         self.probe_queue.retain(|queued| queued != key);
         self.probes.remove(key);

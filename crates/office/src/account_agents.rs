@@ -1,9 +1,12 @@
 use crate::{
     accounts::{AccountsDocument, default_folder},
+    office_policy::{self, OfficePolicy, PolicyEvent},
     office_store::Provider,
 };
+use acp_thread::policy::ThreadPolicies;
 use anyhow::{Context as _, Result};
 use collections::{HashMap, HashSet};
+use futures::channel::mpsc::UnboundedSender;
 use gpui::{App, AsyncApp, Entity, SharedString, Task};
 use project::{
     AgentId, Project, ProjectEnvironment,
@@ -15,13 +18,12 @@ use project::{
 use std::{
     any::Any,
     path::{Path, PathBuf},
+    rc::Rc,
 };
 
 /// Reserved for Office: the agent store lets these ids win over settings entries.
 pub const AGENT_ID_PREFIX: &str = "office-";
 
-const CLAUDE_ADAPTER: &str = "@agentclientprotocol/claude-agent-acp@0.94.0";
-const CODEX_ADAPTER: &str = "@agentclientprotocol/codex-acp@2.5.0";
 const CODEX_INITIAL_MODE_VARIABLE: &str = "INITIAL_AGENT_MODE";
 const CODEX_INITIAL_MODE: &str = "read-only";
 
@@ -97,11 +99,11 @@ pub fn adapter_command(
     folder: &Path,
     extra_args: Vec<String>,
 ) -> AgentServerCommand {
-    let (package, config_variable) = match provider {
-        Provider::Claude => (CLAUDE_ADAPTER, "CLAUDE_CONFIG_DIR"),
-        Provider::Codex => (CODEX_ADAPTER, "CODEX_HOME"),
+    let config_variable = match provider {
+        Provider::Claude => "CLAUDE_CONFIG_DIR",
+        Provider::Codex => "CODEX_HOME",
     };
-    let mut args = vec!["-y".to_string(), package.to_string()];
+    let mut args = vec!["-y".to_string(), office_policy::adapter(provider).spec()];
     args.extend(extra_args);
     let mut env = CLEARED_CREDENTIAL_VARIABLES
         .iter()
@@ -180,6 +182,7 @@ impl RegisteredAgents {
         &mut self,
         agents: Vec<AccountAgent>,
         project: &Entity<Project>,
+        policy_events: &UnboundedSender<PolicyEvent>,
         cx: &mut App,
     ) -> Result<Vec<AccountAgent>> {
         let store = project.read(cx).agent_server_store().clone();
@@ -195,11 +198,17 @@ impl RegisteredAgents {
             store.update(cx, |store, cx| {
                 store.unregister_dynamic_agent(&agent.agent_id, cx)
             });
+            ThreadPolicies::unregister(&agent.agent_id, cx);
         }
         for agent in &agents {
             if kept.contains(agent) {
                 continue;
             }
+            ThreadPolicies::register(
+                agent.agent_id.clone(),
+                Rc::new(OfficePolicy::new(agent.key.provider, policy_events.clone())),
+                cx,
+            );
             register(&store, agent.clone(), project_environment.clone(), cx)?;
         }
         self.agents = agents;
@@ -212,6 +221,7 @@ impl RegisteredAgents {
             store.update(cx, |store, cx| {
                 store.unregister_dynamic_agent(&agent.agent_id, cx)
             });
+            ThreadPolicies::unregister(&agent.agent_id, cx);
         }
     }
 }
@@ -400,8 +410,27 @@ mod tests {
             .add(Provider::Claude, "Empresa", OffsetDateTime::UNIX_EPOCH)
             .expect("add account");
         let mut registered = RegisteredAgents::default();
-        cx.update(|cx| registered.sync(account_agents(&document, root), &project, cx))
-            .expect("register agents");
+        let (policy_events, _policy_receiver) = futures::channel::mpsc::unbounded();
+        cx.update(|cx| {
+            registered.sync(
+                account_agents(&document, root),
+                &project,
+                &policy_events,
+                cx,
+            )
+        })
+        .expect("register agents");
+        cx.update(|cx| {
+            assert!(
+                ThreadPolicies::for_agent(&AgentId::new("office-claude-default"), cx).is_some()
+            );
+            for other in ["claude-acp", "codex-acp", "Claude A"] {
+                assert!(
+                    ThreadPolicies::for_agent(&AgentId::new(other), cx).is_none(),
+                    "{other} is not an Office agent"
+                );
+            }
+        });
 
         let store = project.read_with(cx, |project, _| project.agent_server_store().clone());
         store.read_with(cx, |store, _| {
@@ -428,8 +457,17 @@ mod tests {
 
         document.accounts.clear();
         let removed = cx
-            .update(|cx| registered.sync(account_agents(&document, root), &project, cx))
+            .update(|cx| {
+                registered.sync(
+                    account_agents(&document, root),
+                    &project,
+                    &policy_events,
+                    cx,
+                )
+            })
             .expect("unregister removed account");
+        let removed_id = removed[0].agent_id.clone();
+        cx.update(|cx| assert!(ThreadPolicies::for_agent(&removed_id, cx).is_none()));
         assert_eq!(removed.len(), 1);
         assert_eq!(removed[0].key.account_id, Some(added.id.clone()));
         store.read_with(cx, |store, _| {
