@@ -256,6 +256,10 @@ impl OfficePanel {
             }
         });
         if let Some(thread_id) = created {
+            // Approvals of the previous thread no longer belong on the post's card.
+            self.accounts.update(cx, |accounts, cx| {
+                accounts.forget_post_approvals(&post.id, cx)
+            });
             let save = self.post_threads.set(&post.id, thread_id, cx);
             cx.spawn(async move |panel, cx| {
                 if let Err(error) = save.await {
@@ -439,27 +443,34 @@ impl OfficePanel {
                 |action: &str| -> SharedString { format!("{action}-{}-{index}", post.id).into() };
             // Titles and reasons can be long paths: they get their own truncated line so
             // the buttons always stay inside the card.
-            state =
-                state
-                    .child(Label::new(title).size(LabelSize::Small).truncate())
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(Button::new(element_id("approve"), "Aprobar").on_click(
-                                cx.listener(move |panel, _, _, cx| {
-                                    panel.accounts.update(cx, |accounts, cx| {
-                                        accounts.answer_approval(request, true, cx)
-                                    })
-                                }),
-                            ))
-                            .child(Button::new(element_id("reject"), "Rechazar").on_click(
-                                cx.listener(move |panel, _, _, cx| {
-                                    panel.accounts.update(cx, |accounts, cx| {
-                                        accounts.answer_approval(request, false, cx)
-                                    })
-                                }),
-                            )),
-                    );
+            state = state
+                .child(Label::new(title).size(LabelSize::Small).truncate())
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            div()
+                                .debug_selector(|| element_id("approve").to_string())
+                                .child(Button::new(element_id("approve"), "Aprobar").on_click(
+                                    cx.listener(move |panel, _, _, cx| {
+                                        panel.accounts.update(cx, |accounts, cx| {
+                                            accounts.answer_approval(request, true, cx)
+                                        })
+                                    }),
+                                )),
+                        )
+                        .child(
+                            div()
+                                .debug_selector(|| element_id("reject").to_string())
+                                .child(Button::new(element_id("reject"), "Rechazar").on_click(
+                                    cx.listener(move |panel, _, _, cx| {
+                                        panel.accounts.update(cx, |accounts, cx| {
+                                            accounts.answer_approval(request, false, cx)
+                                        })
+                                    }),
+                                )),
+                        ),
+                );
         }
         if let Some(notice) = notice {
             let dismissed = post.id.clone();
@@ -891,5 +902,266 @@ impl Render for OfficePanel {
                     .child(self.accounts.clone()),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use acp_thread::{
+        AcpThread, AcpThreadEvent, AgentConnection as _, AuthorizationKind, PermissionOptions,
+        RequestPermissionOutcome, StubAgentConnection,
+    };
+    use agent_client_protocol::{v1::schema as acp_v1, v2::schema as acp_v2};
+    use agent_ui::thread_metadata_store::ThreadMetadata;
+    use gpui::{Modifiers, TestAppContext, VisualTestContext};
+    use project::FakeFs;
+    use settings::SettingsStore;
+    use std::{cell::RefCell, rc::Rc};
+    use util::path_list::PathList;
+
+    const POST_ID: &str = "post-1";
+
+    fn init(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            ThreadMetadataStore::init_global(cx);
+        });
+    }
+
+    struct Fixture {
+        panel: Entity<OfficePanel>,
+        thread: Entity<AcpThread>,
+        cx: VisualTestContext,
+    }
+
+    /// An Office panel with one Claude post whose thread is linked, as after opening it from
+    /// the card and sending a first message.
+    async fn panel_with_linked_thread(cx: &mut TestAppContext) -> Fixture {
+        init(cx);
+        let fs = FakeFs::new(cx.executor());
+        let office = serde_json::json!({
+            "version": 1,
+            "posts": [{
+                "id": POST_ID,
+                "name": "Consulta",
+                "role": "backend",
+                "provider": "claude",
+            }],
+        });
+        fs.insert_tree(
+            "/project",
+            serde_json::json!({ ".uacode": { "office.json": office.to_string() } }),
+        )
+        .await;
+        let project = Project::test(fs, [Path::new("/project")], cx).await;
+        let window = cx.add_window(|window, cx| Workspace::test_new(project.clone(), window, cx));
+        let workspace = window.root(cx).expect("workspace");
+        let mut cx = VisualTestContext::from_window(*window, cx);
+        let panel = cx
+            .update(|window, cx| OfficePanel::load(workspace.downgrade(), window.to_async(cx)))
+            .await
+            .expect("office panel");
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace.open_panel::<OfficePanel>(window, cx);
+        });
+        cx.run_until_parked();
+
+        let connection = Rc::new(
+            StubAgentConnection::new()
+                .with_agent_id(AgentId::new("office-claude-default"))
+                .with_agent_version(crate::office_policy::CLAUDE_ADAPTER.version),
+        );
+        let thread = cx
+            .update(|_, cx| {
+                connection.clone().new_session(
+                    project.clone(),
+                    PathList::new(&[Path::new("/project")]),
+                    cx,
+                )
+            })
+            .await
+            .expect("session");
+        let thread_id = ThreadId::new();
+        let session_id = thread.read_with(&cx, |thread, _| thread.session_id().clone());
+        cx.update(|_, cx| {
+            ThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                store.save(
+                    ThreadMetadata {
+                        thread_id,
+                        session_id: Some(session_id),
+                        agent_id: AgentId::new("office-claude-default"),
+                        title: Some("Consulta".into()),
+                        title_override: None,
+                        updated_at: Default::default(),
+                        created_at: None,
+                        interacted_at: None,
+                        worktree_paths: Default::default(),
+                        remote_connection: None,
+                        archived: false,
+                    },
+                    cx,
+                )
+            });
+        });
+        panel.update_in(&mut cx, |panel, _, cx| {
+            panel.post_threads.set(POST_ID, thread_id, cx).detach();
+        });
+        cx.run_until_parked();
+        Fixture { panel, thread, cx }
+    }
+
+    fn request_read_permission(
+        thread: &Entity<AcpThread>,
+        tool_call: &str,
+        cx: &mut VisualTestContext,
+    ) -> Task<RequestPermissionOutcome> {
+        thread.update(cx, |thread, cx| {
+            thread
+                .request_tool_call_authorization(
+                    acp_v1::ToolCall::new(acp_v1::ToolCallId::new(tool_call), "Read fuera.txt")
+                        .kind(acp_v1::ToolKind::Read)
+                        .into(),
+                    PermissionOptions::Flat(vec![
+                        acp_v2::PermissionOption::new(
+                            "allow",
+                            "Yes",
+                            acp_v2::PermissionOptionKind::AllowOnce,
+                        ),
+                        acp_v2::PermissionOption::new(
+                            "allow_always",
+                            "Yes, during this session",
+                            acp_v2::PermissionOptionKind::AllowAlways,
+                        ),
+                        acp_v2::PermissionOption::new(
+                            "reject",
+                            "No",
+                            acp_v2::PermissionOptionKind::RejectOnce,
+                        ),
+                    ]),
+                    AuthorizationKind::PermissionGrant,
+                    cx,
+                )
+                .expect("permission request")
+        })
+    }
+
+    #[gpui::test]
+    async fn approving_and_rejecting_from_the_card_answer_the_thread(cx: &mut TestAppContext) {
+        let Fixture {
+            panel,
+            thread,
+            mut cx,
+        } = panel_with_linked_thread(cx).await;
+        let received = Rc::new(RefCell::new(0));
+        let _subscription = cx.update(|_, cx| {
+            cx.subscribe(&thread, {
+                let received = received.clone();
+                move |_, event, _| {
+                    if matches!(event, AcpThreadEvent::ToolAuthorizationReceived(_)) {
+                        *received.borrow_mut() += 1;
+                    }
+                }
+            })
+        });
+
+        for (tool_call, button, expected) in [
+            ("read-1", "approve", "allow"),
+            ("read-2", "reject", "reject"),
+        ] {
+            let outcome = request_read_permission(&thread, tool_call, &mut cx);
+            cx.run_until_parked();
+            panel.read_with(&cx, |panel, cx| {
+                assert_eq!(
+                    panel
+                        .accounts
+                        .read(cx)
+                        .post_pending_approvals(POST_ID)
+                        .len(),
+                    1,
+                    "the card shows the pending request"
+                );
+            });
+            let selector: &'static str = match button {
+                "approve" => "approve-post-1-0",
+                _ => "reject-post-1-0",
+            };
+            let bounds = cx
+                .debug_bounds(selector)
+                .expect("the card renders the button");
+            cx.simulate_click(bounds.center(), Modifiers::default());
+            cx.run_until_parked();
+
+            match outcome.await {
+                RequestPermissionOutcome::Selected(selected) => {
+                    assert_eq!(selected.option_id.0.as_ref(), expected)
+                }
+                other => panic!("{button}: unexpected outcome {other:?}"),
+            }
+            panel.read_with(&cx, |panel, cx| {
+                assert!(
+                    panel
+                        .accounts
+                        .read(cx)
+                        .post_pending_approvals(POST_ID)
+                        .is_empty(),
+                    "{button}: the card is cleared"
+                );
+            });
+        }
+        assert_eq!(*received.borrow(), 2);
+    }
+
+    fn pending_on_card(panel: &Entity<OfficePanel>, cx: &VisualTestContext) -> usize {
+        panel.read_with(cx, |panel, cx| {
+            panel
+                .accounts
+                .read(cx)
+                .post_pending_approvals(POST_ID)
+                .len()
+        })
+    }
+
+    #[gpui::test]
+    async fn a_request_cancelled_in_the_thread_leaves_the_card(cx: &mut TestAppContext) {
+        let Fixture {
+            panel,
+            thread,
+            mut cx,
+        } = panel_with_linked_thread(cx).await;
+        let _outcome = request_read_permission(&thread, "read-1", &mut cx);
+        cx.run_until_parked();
+        assert_eq!(pending_on_card(&panel, &cx), 1);
+
+        thread.update(&mut cx, |thread, cx| {
+            thread.cancel_tool_call_authorization(&acp_v2::ToolCallId::new("read-1"), cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(pending_on_card(&panel, &cx), 0);
+    }
+
+    #[gpui::test]
+    async fn an_unanswerable_approval_is_removed_from_the_card(cx: &mut TestAppContext) {
+        let Fixture {
+            panel,
+            thread,
+            mut cx,
+        } = panel_with_linked_thread(cx).await;
+        let _outcome = request_read_permission(&thread, "read-1", &mut cx);
+        cx.run_until_parked();
+        assert_eq!(pending_on_card(&panel, &cx), 1);
+
+        // The thread goes away without answering, as when its view is closed.
+        drop(thread);
+        cx.run_until_parked();
+        let bounds = cx
+            .debug_bounds("approve-post-1-0")
+            .expect("the card still offers the approval");
+        cx.simulate_click(bounds.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(pending_on_card(&panel, &cx), 0);
     }
 }

@@ -255,15 +255,30 @@ impl AccountsView {
         else {
             return;
         };
-        match pending.thread.upgrade() {
-            Some(thread) => thread.update(cx, |thread, cx| {
+        let answered = pending.thread.upgrade().is_some_and(|thread| {
+            thread.update(cx, |thread, cx| {
                 thread.answer_permission_request(request, allow, cx)
-            }),
-            None => {
-                self.pending_approvals
-                    .retain(|pending| pending.request != request);
-                cx.notify();
-            }
+            })
+        });
+        // Answered requests leave through `ToolAuthorizationReceived`; one that could not be
+        // answered is gone from its thread and must not stay on the card.
+        if !answered {
+            log::warn!(
+                "Pending approval {request:?} could not be answered; removing it from the card"
+            );
+            self.pending_approvals
+                .retain(|pending| pending.request != request);
+            cx.notify();
+        }
+    }
+
+    /// Forgets a post's pending approvals, for example when it starts a new thread.
+    pub fn forget_post_approvals(&mut self, post_id: &str, cx: &mut Context<Self>) {
+        let before = self.pending_approvals.len();
+        self.pending_approvals
+            .retain(|pending| pending.post_id != post_id);
+        if self.pending_approvals.len() != before {
+            cx.notify();
         }
     }
 
@@ -290,10 +305,14 @@ impl AccountsView {
                 let Some(title) = thread.read(cx).permission_request_title(request, cx) else {
                     return;
                 };
-                let subscription = cx.subscribe(&thread, move |view, _, event, cx| {
-                    if let AcpThreadEvent::ToolAuthorizationReceived(id) = event
-                        && *id == request
-                    {
+                // Any change in the thread can end the request: an answer, a cancelled
+                // request or turn, or a tool call that finished.
+                let subscription = cx.subscribe(&thread, move |view, thread, event, cx| {
+                    let answered = matches!(
+                        event,
+                        AcpThreadEvent::ToolAuthorizationReceived(id) if *id == request
+                    );
+                    if answered || thread.read(cx).permission_request(request).is_none() {
                         view.pending_approvals
                             .retain(|pending| pending.request != request);
                         cx.notify();
