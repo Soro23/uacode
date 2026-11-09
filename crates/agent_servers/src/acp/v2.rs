@@ -838,6 +838,9 @@ impl AcpV2Connection {
         let agent_version = self.agent_version();
         loop {
             let next = cx.update(|cx| {
+                if !crate::uses_saved_preferences(&self.id, cx) {
+                    return None;
+                }
                 let settings = cx
                     .try_global::<SettingsStore>()?
                     .get::<AllAgentServersSettings>(None);

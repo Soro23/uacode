@@ -19,6 +19,13 @@ pub const CLAUDE_AGENT_ID: &str = "claude-acp";
 pub const CODEX_ID: &str = "codex-acp";
 pub const CURSOR_ID: &str = "cursor";
 
+/// Whether the agent's preferences saved in settings.json apply. The agent's thread policy
+/// can make thread choices session-only, so nothing is read from or written to settings.
+pub fn uses_saved_preferences(agent_id: &AgentId, cx: &App) -> bool {
+    acp_thread::policy::ThreadPolicies::for_agent(agent_id, cx)
+        .is_none_or(|policy| policy.uses_saved_preferences())
+}
+
 /// A generic agent server implementation for custom user-defined agents
 pub struct CustomAgentServer {
     agent_id: AgentId,
@@ -40,6 +47,9 @@ impl AgentServer for CustomAgentServer {
     }
 
     fn default_mode(&self, cx: &App) -> Option<acp_v2::SessionConfigValueId> {
+        if !uses_saved_preferences(&self.agent_id, cx) {
+            return None;
+        }
         let settings = cx.read_global(|settings: &SettingsStore, _| {
             settings
                 .get::<AllAgentServersSettings>(None)
@@ -57,6 +67,9 @@ impl AgentServer for CustomAgentServer {
         config_id: &acp_v2::SessionConfigId,
         cx: &mut App,
     ) -> HashSet<acp_v2::SessionConfigValueId> {
+        if !uses_saved_preferences(&self.agent_id, cx) {
+            return HashSet::default();
+        }
         let settings = cx.read_global(|settings: &SettingsStore, _| {
             settings
                 .get::<AllAgentServersSettings>(None)
@@ -85,6 +98,9 @@ impl AgentServer for CustomAgentServer {
         fs: Arc<dyn Fs>,
         cx: &App,
     ) {
+        if !uses_saved_preferences(&self.agent_id, cx) {
+            return;
+        }
         let agent_id = self.agent_id();
         let config_id = config_id.to_string();
         let value_id = value_id.to_string();
@@ -130,6 +146,9 @@ impl AgentServer for CustomAgentServer {
         fs: Arc<dyn Fs>,
         cx: &mut App,
     ) {
+        if !uses_saved_preferences(&self.agent_id, cx) {
+            return;
+        }
         let agent_id = self.agent_id();
         update_settings_file(fs, cx, move |settings, _cx| {
             let settings = settings
@@ -148,6 +167,9 @@ impl AgentServer for CustomAgentServer {
     }
 
     fn default_config_option(&self, config_id: &str, cx: &App) -> Option<AgentConfigOptionValue> {
+        if !uses_saved_preferences(&self.agent_id, cx) {
+            return None;
+        }
         let settings = cx.read_global(|settings: &SettingsStore, _| {
             settings
                 .get::<AllAgentServersSettings>(None)
@@ -167,6 +189,9 @@ impl AgentServer for CustomAgentServer {
         fs: Arc<dyn Fs>,
         cx: &mut App,
     ) {
+        if !uses_saved_preferences(&self.agent_id, cx) {
+            return;
+        }
         let agent_id = self.agent_id();
         let config_id = config_id.to_string();
         update_settings_file(fs, cx, move |settings, _cx| {
@@ -204,7 +229,11 @@ impl AgentServer for CustomAgentServer {
         let agent_id = self.agent_id();
         let default_mode = self.default_mode(cx);
         let is_registry_agent = is_registry_agent(agent_id.clone(), cx);
+        let uses_saved_preferences = uses_saved_preferences(&agent_id, cx);
         let default_config_options = cx.read_global(|settings: &SettingsStore, _| {
+            if !uses_saved_preferences {
+                return Default::default();
+            }
             settings
                 .get::<AllAgentServersSettings>(None)
                 .get(self.agent_id().as_ref())
@@ -394,6 +423,103 @@ mod tests {
                 ),
                 cx,
             );
+        });
+    }
+
+    struct SessionOnlyPreferences;
+
+    impl acp_thread::policy::ThreadPolicy for SessionOnlyPreferences {
+        fn decide(
+            &self,
+            _: &acp_thread::policy::PolicyContext,
+            _: &acp_thread::policy::PolicyRequest,
+            _: &App,
+        ) -> acp_thread::policy::PolicyDecision {
+            acp_thread::policy::PolicyDecision::Allow
+        }
+
+        fn uses_saved_preferences(&self) -> bool {
+            false
+        }
+    }
+
+    #[gpui::test]
+    async fn test_session_only_agents_never_touch_settings(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = fs::FakeFs::new(cx.executor());
+        let saved = || settings::CustomAgentServerSettings::Registry {
+            env: HashMap::default(),
+            default_mode: Some("bypassPermissions".into()),
+            default_config_options: HashMap::from_iter([(
+                "model".into(),
+                AgentConfigOptionValue::ValueId("large".into()),
+            )]),
+            favorite_config_option_values: HashMap::from_iter([(
+                "model".into(),
+                vec!["large".into()],
+            )]),
+        };
+        set_agent_server_settings(
+            cx,
+            vec![("office-claude-default", saved()), ("claude-acp", saved())],
+        );
+        let write_preferences = |server: &CustomAgentServer, cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                server.set_default_mode(Some("plan".into()), fs.clone(), cx);
+                server.set_default_config_option(
+                    "model",
+                    Some(AgentConfigOptionValue::ValueId("small".into())),
+                    fs.clone(),
+                    cx,
+                );
+                server.toggle_favorite_config_option_value(
+                    "model".into(),
+                    "small".into(),
+                    true,
+                    fs.clone(),
+                    cx,
+                );
+            });
+            cx.run_until_parked();
+        };
+
+        // Control: an agent without such a policy keeps saving its preferences.
+        let regular = CustomAgentServer::new(AgentId::new("claude-acp"));
+        write_preferences(&regular, cx);
+        assert!(
+            !fs.files().is_empty(),
+            "a regular agent writes settings.json"
+        );
+        let written = fs.files();
+
+        cx.update(|cx| {
+            acp_thread::policy::ThreadPolicies::register(
+                AgentId::new("office-claude-default"),
+                Rc::new(SessionOnlyPreferences),
+                cx,
+            )
+        });
+        let office = CustomAgentServer::new(AgentId::new("office-claude-default"));
+        let before = futures::future::join_all(written.iter().map(|path| fs.load(path))).await;
+        write_preferences(&office, cx);
+        let after = futures::future::join_all(written.iter().map(|path| fs.load(path))).await;
+        assert_eq!(fs.files(), written, "no new settings file");
+        assert_eq!(
+            before.into_iter().map(Result::ok).collect::<Vec<_>>(),
+            after.into_iter().map(Result::ok).collect::<Vec<_>>(),
+            "settings.json does not change"
+        );
+
+        // Preferences already saved for the agent are ignored.
+        cx.update(|cx| {
+            assert_eq!(office.default_mode(cx), None);
+            assert_eq!(office.default_config_option("model", cx), None);
+            assert!(
+                office
+                    .favorite_config_option_value_ids(&"model".into(), cx)
+                    .is_empty()
+            );
+            assert!(regular.default_mode(cx).is_some());
         });
     }
 

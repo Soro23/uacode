@@ -89,6 +89,13 @@ pub trait ThreadPolicy: 'static {
         Ok(None)
     }
 
+    /// Whether the agent's preferences saved in settings.json (default mode, default config
+    /// options and favorite values) are read and written. When `false`, choices made in a
+    /// thread only affect that session.
+    fn uses_saved_preferences(&self) -> bool {
+        true
+    }
+
     /// A request this policy left to the user is waiting in `thread`. Lets the embedder show
     /// it elsewhere and answer it with [`AcpThread::answer_permission_request`].
     fn permission_pending(

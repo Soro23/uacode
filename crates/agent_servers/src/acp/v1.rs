@@ -132,6 +132,10 @@ impl AcpConnectionDefaults {
     }
 
     fn refresh_from_settings(&self, agent_id: &AgentId, cx: &App) {
+        if !crate::uses_saved_preferences(agent_id, cx) {
+            self.set(None, HashMap::default());
+            return;
+        }
         let Some(settings_store) = cx.try_global::<SettingsStore>() else {
             self.set(None, HashMap::default());
             return;
