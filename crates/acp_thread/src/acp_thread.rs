@@ -8,6 +8,8 @@ mod diff;
 pub mod elicitation;
 mod mention;
 pub mod notices;
+// UACode: per-agent policy hook for Office threads.
+pub mod policy;
 pub mod prompt_capabilities;
 pub mod subagents;
 mod submission;
@@ -3737,6 +3739,20 @@ fn stop_reason_from_v1(reason: &acp_v1::StopReason) -> Option<acp_v2::StopReason
     })
 }
 
+// UACode: how a policy decision resolves a permission request.
+enum PolicyPermissionAnswer {
+    Select {
+        outcome: SelectedPermissionOutcome,
+        denial_reason: Option<SharedString>,
+    },
+    Cancel {
+        reason: SharedString,
+    },
+}
+
+const POLICY_ALLOW_OPTION_ID: &str = "uacode-policy-allow";
+const POLICY_REJECT_OPTION_ID: &str = "uacode-policy-reject";
+
 pub struct AcpThread {
     session_info: AgentSessionInfo,
     parent_session_id: Option<acp_v2::SessionId>,
@@ -3789,6 +3805,8 @@ pub struct AcpThread {
     /// reveal text gradually without changing the authoritative message.
     streaming_text_buffer: Option<StreamingTextBuffer>,
     idle_sleep_prevention: IdleSleepPrevention,
+    /// UACode: agent mode changes the policy reverted, to stop an agent that keeps switching.
+    denied_agent_mode_changes: usize,
 }
 
 enum IdleSleepPrevention {
@@ -4151,6 +4169,7 @@ impl AcpThread {
             ui_scroll_position: None,
             streaming_text_buffer: None,
             idle_sleep_prevention: IdleSleepPrevention::Inactive,
+            denied_agent_mode_changes: 0,
         }
     }
 
@@ -6774,6 +6793,32 @@ impl AcpThread {
             self.upsert_wire_tool_call(subject.tool_call.clone(), cx)?;
         }
 
+        // UACode: a registered policy answers before the request reaches the user.
+        let tool_call_id = match &request.subject {
+            Some(acp_v2::RequestPermissionSubject::ToolCall(subject)) => {
+                Some(subject.tool_call.tool_call_id.clone())
+            }
+            _ => None,
+        };
+        let policy_answer = self.policy_permission_answer(
+            tool_call_id.as_ref(),
+            &PermissionOptions::Flat(request.options.clone()),
+            cx,
+        );
+        let (id, task) =
+            self.install_generic_permission_request(request, policy_answer.is_none(), cx);
+        if let Some(answer) = policy_answer {
+            self.apply_policy_permission_answer(id, answer, cx);
+        }
+        Ok((id, task))
+    }
+
+    fn install_generic_permission_request(
+        &mut self,
+        request: acp_v2::RequestPermissionRequest,
+        notify: bool,
+        cx: &mut Context<Self>,
+    ) -> (PermissionRequestId, Task<acp_v2::RequestPermissionOutcome>) {
         let (respond_tx, receiver) = oneshot::channel();
         let id = PermissionRequestId(Uuid::new_v4());
         self.permission_requests.insert(
@@ -6786,8 +6831,10 @@ impl AcpThread {
                 },
             },
         );
-        cx.emit(AcpThreadEvent::ToolAuthorizationRequested(id));
-        Ok((
+        if notify {
+            cx.emit(AcpThreadEvent::ToolAuthorizationRequested(id));
+        }
+        (
             id,
             cx.spawn(async move |_, _| {
                 receiver
@@ -6796,7 +6843,190 @@ impl AcpThread {
                         Default::default(),
                     ))
             }),
-        ))
+        )
+    }
+
+    /// UACode: the decision of the agent's registered policy, if it has one.
+    pub fn policy_decision(
+        &self,
+        request: &policy::PolicyRequest,
+        cx: &App,
+    ) -> Option<policy::PolicyDecision> {
+        let agent_id = self.connection.agent_id();
+        policy::ThreadPolicies::decide(
+            &policy::PolicyContext {
+                agent_id: &agent_id,
+                session_id: &self.session_info.session_id,
+                parent_session_id: self.parent_session_id.as_ref(),
+            },
+            request,
+            cx,
+        )
+    }
+
+    fn push_policy_notice(&mut self, title: &str, reason: SharedString, cx: &mut Context<Self>) {
+        log::info!("{title}: {reason}");
+        self.push_notice(
+            acp_v2::Notice::new(acp_v2::NoticeSeverity::Warning, title)
+                .description(reason.to_string()),
+            cx,
+        );
+    }
+
+    /// Never picks an "always" option, so the agent does not persist a rule the policy did
+    /// not grant. Without a one-time option, an allowed request goes to the user.
+    fn policy_permission_answer(
+        &self,
+        tool_call_id: Option<&acp_v2::ToolCallId>,
+        options: &PermissionOptions,
+        cx: &App,
+    ) -> Option<PolicyPermissionAnswer> {
+        let tool_call = tool_call_id
+            .and_then(|id| self.tool_call(id))
+            .map(|(_, call)| call);
+        match self.policy_decision(&policy::PolicyRequest::Permission { tool_call }, cx)? {
+            policy::PolicyDecision::AskUser => None,
+            policy::PolicyDecision::Allow => options
+                .first_option_of_kind(acp_v2::PermissionOptionKind::AllowOnce)
+                .map(|option| PolicyPermissionAnswer::Select {
+                    outcome: SelectedPermissionOutcome::new(
+                        option.option_id.clone(),
+                        option.kind.clone(),
+                    ),
+                    denial_reason: None,
+                }),
+            policy::PolicyDecision::Deny { reason } => Some(
+                match options.first_option_of_kind(acp_v2::PermissionOptionKind::RejectOnce) {
+                    Some(option) => PolicyPermissionAnswer::Select {
+                        outcome: SelectedPermissionOutcome::new(
+                            option.option_id.clone(),
+                            option.kind.clone(),
+                        ),
+                        denial_reason: Some(reason),
+                    },
+                    None => PolicyPermissionAnswer::Cancel { reason },
+                },
+            ),
+        }
+    }
+
+    fn apply_policy_permission_answer(
+        &mut self,
+        id: PermissionRequestId,
+        answer: PolicyPermissionAnswer,
+        cx: &mut Context<Self>,
+    ) {
+        let is_generic = self
+            .permission_request(id)
+            .is_some_and(|request| request.generic_request().is_some());
+        match answer {
+            PolicyPermissionAnswer::Select {
+                outcome,
+                denial_reason,
+            } => {
+                if let Some(reason) = denial_reason {
+                    self.push_policy_notice("Permiso denegado por la política", reason, cx);
+                }
+                if is_generic {
+                    self.select_permission_option(id, outcome.option_id, cx);
+                } else {
+                    self.authorize_permission_request(id, outcome, cx);
+                }
+            }
+            PolicyPermissionAnswer::Cancel { reason } => {
+                self.push_policy_notice("Permiso denegado por la política", reason, cx);
+                self.cancel_permission_request(id, cx);
+            }
+        }
+    }
+
+    /// UACode: client file writes and terminals the agent asks Zed for pass through the
+    /// agent's policy. A request to ask the user is shown like a permission request.
+    fn authorize_client_operation(
+        &mut self,
+        request: &policy::PolicyRequest,
+        title: String,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        match self.policy_decision(request, cx) {
+            None | Some(policy::PolicyDecision::Allow) => Task::ready(Ok(())),
+            Some(policy::PolicyDecision::Deny { reason }) => {
+                self.push_policy_notice("Operación bloqueada por la política", reason.clone(), cx);
+                Task::ready(Err(anyhow!(
+                    "Bloqueado por la política del agente: {reason}"
+                )))
+            }
+            Some(policy::PolicyDecision::AskUser) => {
+                let request = acp_v2::RequestPermissionRequest::new(
+                    self.session_info.session_id.clone(),
+                    title,
+                    vec![
+                        acp_v2::PermissionOption::new(
+                            POLICY_ALLOW_OPTION_ID,
+                            "Permitir",
+                            acp_v2::PermissionOptionKind::AllowOnce,
+                        ),
+                        acp_v2::PermissionOption::new(
+                            POLICY_REJECT_OPTION_ID,
+                            "Rechazar",
+                            acp_v2::PermissionOptionKind::RejectOnce,
+                        ),
+                    ],
+                );
+                let (_, outcome) = self.install_generic_permission_request(request, true, cx);
+                cx.spawn(async move |_, _| match outcome.await {
+                    acp_v2::RequestPermissionOutcome::Selected(selected)
+                        if selected.option_id.0.as_ref() == POLICY_ALLOW_OPTION_ID =>
+                    {
+                        Ok(())
+                    }
+                    _ => Err(anyhow!("El usuario no autorizó la operación")),
+                })
+            }
+        }
+    }
+
+    pub fn authorize_terminal(
+        &mut self,
+        command: &str,
+        args: &[String],
+        cwd: Option<&std::path::Path>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        let title = format!("Ejecutar `{command} {}`", args.join(" "));
+        self.authorize_client_operation(
+            &policy::PolicyRequest::CreateTerminal { command, args, cwd },
+            title,
+            cx,
+        )
+    }
+
+    /// UACode: whether a mode change the agent reported may stand. The caller reverts a
+    /// denied change; from the second one in a session the running turn is also cancelled,
+    /// so an agent that keeps switching cannot loop against the reversion.
+    pub fn agent_mode_change_stands(&mut self, mode: &str, cx: &mut Context<Self>) -> bool {
+        let origin = policy::ModeChangeOrigin::Agent;
+        let Some(decision) =
+            self.policy_decision(&policy::PolicyRequest::SetMode { mode, origin }, cx)
+        else {
+            return true;
+        };
+        if decision.allows_mode_change(origin) {
+            return true;
+        }
+        self.denied_agent_mode_changes += 1;
+        let reason = decision.denial_reason();
+        if self.denied_agent_mode_changes > 1 {
+            self.push_policy_notice(
+                "Turno detenido: el agente volvió a cambiar a un modo no permitido",
+                reason,
+                cx,
+            );
+            gpui::TaskExt::detach_and_log_err(self.cancel(cx), cx);
+        } else {
+            self.push_policy_notice("Cambio de modo revertido por la política", reason, cx);
+        }
+        false
     }
 
     pub fn select_permission_option(
@@ -6913,6 +7143,13 @@ impl AcpThread {
         {
             self.resolve_permission_request(id, RequestPermissionOutcome::Cancelled, cx);
         }
+        // UACode: a registered policy answers before the request reaches the user.
+        let policy_answer = match kind {
+            AuthorizationKind::PermissionGrant => {
+                self.policy_permission_answer(Some(&tool_call_id), &options, cx)
+            }
+            AuthorizationKind::ActionChoice => None,
+        };
         let id = PermissionRequestId(Uuid::new_v4());
         let (_, call) = self
             .tool_call_mut(&tool_call_id)
@@ -6932,7 +7169,10 @@ impl AcpThread {
                 },
             },
         );
-        cx.emit(AcpThreadEvent::ToolAuthorizationRequested(id));
+        match policy_answer {
+            Some(answer) => self.apply_policy_permission_answer(id, answer, cx),
+            None => cx.emit(AcpThreadEvent::ToolAuthorizationRequested(id)),
+        }
 
         Ok((
             id,
@@ -8173,15 +8413,22 @@ impl AcpThread {
     }
 
     pub fn write_text_file(
-        &self,
+        &mut self,
         path: PathBuf,
         content: String,
         cx: &mut Context<Self>,
     ) -> Task<Result<()>> {
+        // UACode: client writes pass through the agent's policy.
+        let authorization = self.authorize_client_operation(
+            &policy::PolicyRequest::WriteTextFile { path: &path },
+            format!("Escribir {}", path.display()),
+            cx,
+        );
         let project = self.project.clone();
         let action_log = self.action_log.clone();
         let should_update_agent_location = self.parent_session_id.is_none();
         cx.spawn(async move |this, cx| {
+            authorization.await?;
             let load = project.update(cx, |project, cx| {
                 let path = project
                     .project_path_for_absolute_path(&path, cx)
