@@ -11,7 +11,8 @@ Actualizado: 2026-11-09.
 - Fase 1, paso 2: puestos persistentes en `.uacode/office.json` (commit `d0539a0d60`). Crear, editar y archivar puestos; JSON inválido o versión futura en solo lectura con «Abrir archivo» y «Recargar»; posición del dock persistida en la base de datos local.
 - Fase 1, paso 3: catálogo global de cuentas en `accounts.json` (commit `15beb0e1aa`). Alta con nombre único por proveedor, entradas virtuales «Por defecto», importación explícita de carpetas existentes y selector de cuenta en el puesto. Todas las cuentas «Sin probar».
 - Fase 1, paso 4: registro, login y comprobación de cuentas (commits `e5e8ca9371`, `9c1992fc03`, `040f12e913`). Un agente `office-<proveedor>-<id corto>` por cuenta, registrado dinámicamente sin escribir ajustes; «Iniciar sesión» crea la carpeta y lanza el login de suscripción; «Comprobar» sondea `_auth/status_update`. Aprobado en el mensaje #7 tras la prueba de login real del usuario.
-- Fase 1, paso 5: gancho de política (commits `7672740417` en `acp_thread` + `agent_servers`, `b09deb699c` en `office`). `ThreadPolicy` por `AgentId` para permisos, escrituras y terminales del cliente, modo y `_meta` de sesión; Codex de Office arranca en `read-only`. Verificado a mano con prompts reales y una política de prueba en la rama `office-step5-test` (sin fusionar). Pendiente de revisión.
+- Fase 1, paso 5: gancho de política (commits `7672740417` en `acp_thread` + `agent_servers`, `b09deb699c` en `office`). `ThreadPolicy` por `AgentId` para permisos, escrituras y terminales del cliente, modo y `_meta` de sesión; Codex de Office arranca en `read-only`. Verificado a mano con prompts reales y una política de prueba en la rama `office-step5-test` (sin fusionar). Aprobado en el mensaje #9.
+- Fase 1, paso 6: política de Office (commits `b889f4f367` y `f5ec3d7830` en `acp_thread`/`agent_servers`, `95f568000e` y `e2178eeb4f` en `office`). Solo consulta para todos los puestos, guarda de versión de adaptador, aprobaciones y bloqueos en la tarjeta del puesto. Verificado a mano. Pendiente de revisión.
 
 ## Decisiones vigentes
 
@@ -36,11 +37,12 @@ Actualizado: 2026-11-09.
 
 ## Siguiente paso
 
-Revisión del paso 5 por Claude y decisión sobre la rama `office-step5-test` (política de prueba; se puede borrar o conservar como referencia para el paso 6). Después, paso 6: política por puesto/rol sobre el gancho.
+Revisión del paso 6 por Claude. Después se borra la rama `office-step5-test` (mensaje #9).
 
 Pendientes conocidos:
-- Paso 6: la política real por puesto (la de prueba deniega todo permiso y escritura, y fija `disallowedTools`, `allowDangerouslySkipPermissions: false` y `settingSources: ["user"]` para Claude).
-- Paso 7: elegir modelo en un hilo de Office escribe `agent_servers.office-…` con `type: registry` y `default_config_options.model` en `settings.json` (confirmado en la prueba del paso 5). El prefijo reservado evita que rompa el agente; el bloqueo llega en el paso 7.
+- Los hilos aún no están ligados a puestos: la tarjeta muestra aprobaciones y bloqueos del agente de su cuenta, así que dos puestos con la misma cuenta ven lo mismo. Se resuelve cuando Office abra los hilos de cada puesto (sesión → puesto); la política ya busca sus reglas por hilo (`rules_for`).
+- Paso 7: elegir modelo o modo en un hilo de Office escribe `agent_servers.office-…` con `type: registry` y `default_config_options` en `settings.json` (confirmado en los pasos 5 y 6; quedó `"mode": "agent-full-access"` en los datos aislados por el fallo v2 ya corregido). La política rechaza un modo por defecto no permitido, pero el bloqueo de esas escrituras llega en el paso 7.
+- Las builds debug activan `acp-beta` (flags de equipo activos en debug) y Codex usa ACP v2; en release usaría v1. La política cubre ambas rutas desde `f5ec3d7830`.
 - **Riesgo abierto:** el sandbox read-only de Codex en Windows no ha quedado demostrado (en el paso 5 Codex pidió escalada en vez de intentar escribir, así que la barrera efectiva fue el gancho). Se vuelve a probar en la Fase 3, cuando workspace-write sea relevante.
 - En codex-acp el único rechazo de un cambio de archivo es la decisión `cancel`, que termina el turno (diseno.md 2.7 prefería no usar `cancel` como rechazo ordinario; aquí no hay alternativa).
 
@@ -133,5 +135,18 @@ Pendientes conocidos:
   - Prompts enviados: 3 a Codex y 2 a Claude. Ningún caso escribió en disco.
   - Al cerrar UACode no quedó ningún proceso `uacode`, `claude-agent-acp` ni `codex-acp`. Elegir modelo escribió entradas `office-…` en el `settings.json` de los datos aislados (pendiente del paso 7).
   - Computer-use no lanzó otra instancia: la app se abrió desde la terminal y solo se pulsó dentro de su ventana.
+
+- 2026-11-09, mensajes #9 y #10: paso 5 aprobado; paso 6 aprobado; UACode pasa a ser proyecto independiente (documentado en `05c26116e7`). Paso 6 implementado y verificado; ver «Verificación del paso 6».
+
+## Verificación del paso 6
+
+- Gancho ampliado (`b889f4f367`): la política recibe la versión que anuncia el agente, puede rechazar `session/new`, `load` y `resume` con motivo, y se le notifica cada petición que deja al usuario con el hilo; `AcpThread::answer_permission_request` y `permission_request_title` permiten responderla desde el panel.
+- Política de Office (`95f568000e`): Claude con `disallowedTools` (Edit, Write, MultiEdit, NotebookEdit, Bash, PowerShell, Monitor), `allowDangerouslySkipPermissions: false` y `settingSources: []`; modos Claude `default`/`plan`, Codex `read-only`. Permisos de Claude: se deniegan escritura, borrado, movimiento, ejecución, red y cambio de modo; lectura, búsqueda y lo no clasificable van al usuario. Codex: toda petición es una escalada del sandbox y se deniega. Versión distinta de 0.94.0 / 2.5.0 o desconocida: sesión rechazada («Versión de adaptador no verificada») y todo denegado.
+- `settingSources: []` funciona: Claude se autentica con la carpeta de la cuenta y responde (caso c).
+- Tests: `acp_thread` 311, `agent_servers` 187 (v1: sesión rechazada, modo por opción de configuración; v2: `_meta`, modo del usuario rechazado, cambio del agente revertido, sesión rechazada), `office` 34 (decisión por tipo de petición y modo, guarda de versión, opciones de sesión de Claude, eventos al panel, solo los agentes `office-*` reciben política). Clippy sin avisos.
+- Prueba manual (datos aislados, proyecto desechable; registro en `target\office-step5-test\registro.md`): c) ajustes del proyecto ignorados (arranca en Manual), Write/Bash no existen; b) Edit/Write no existen; aprobación: lectura fuera del proyecto → «Esperando aprobación (1)» en la tarjeta → «Aprobar» → Claude leyó el archivo y la petición desapareció del hilo y de la tarjeta; Codex: escalada denegada y bloqueo en la tarjeta. `git status` limpio tras cada prompt. Rechazo de modo del usuario visible en la tarjeta («Bloqueado: …» con «Descartar»).
+- Fallo encontrado en la prueba y corregido (`f5ec3d7830`): en debug Codex usa ACP v2 y el modo no pasaba por la política (se pudo poner «Full access»; se devolvió a Read-only sin enviar prompts). Recomprobado tras la corrección.
+- Maquetación (`e2178eeb4f`): títulos y motivos largos dejaban los botones fuera de la tarjeta; ahora van truncados y con los botones en su propia fila.
+- Prompts: 3 a Claude (b, c y lectura de aprobación) y 1 a Codex. Sin procesos huérfanos al cerrar.
 
 - 2026-11-09, mensaje #7: paso 4 aprobado. Regla nueva sobre instancias de prueba. Paso 5 aprobado en dos fases; entregado el diseño de la Fase A (puntos de permiso, escritura, terminal y modo; interfaz `ThreadPolicy` por `AgentId`; límites de cada adaptador leídos en su código fijado).
