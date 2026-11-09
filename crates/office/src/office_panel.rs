@@ -774,33 +774,42 @@ impl Render for OfficePanel {
             let has_thread = self.post_threads.thread(&post.id).is_some();
             content = content.child(
                 v_flex()
-                    .id(SharedString::from(format!("post-{}", post.id)))
                     .gap_1()
                     .p_2()
                     .border_1()
                     .border_color(cx.theme().colors().border)
-                    .when(!post.archived, |card| {
-                        card.cursor_pointer()
-                            .hover(|style| style.bg(cx.theme().colors().element_hover))
-                            .tooltip(Tooltip::text("Abrir el hilo del puesto"))
-                            .on_click(cx.listener(move |panel, _, window, cx| {
-                                panel.open_post_thread(&opened, false, window, cx)
-                            }))
-                    })
-                    .child(Label::new(post.name.clone()))
-                    .child(Label::new(format!(
-                        "{} · {}",
-                        post.role,
-                        post.provider.label()
-                    )))
-                    .child(Label::new(if post.archived {
-                        "Archivado".to_string()
-                    } else {
-                        match self.accounts.read(cx).post_status_label(&post) {
-                            Some(status) => format!("{thread} · Cuenta: {account} · {status}"),
-                            None => format!("{thread} · Cuenta: {account}"),
-                        }
-                    }))
+                    // Only the summary opens the thread: buttons nested in a clickable
+                    // element never receive their own clicks.
+                    .child(
+                        v_flex()
+                            .id(SharedString::from(format!("post-{}", post.id)))
+                            .gap_1()
+                            .when(!post.archived, |summary| {
+                                summary
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(cx.theme().colors().element_hover))
+                                    .tooltip(Tooltip::text("Abrir el hilo del puesto"))
+                                    .on_click(cx.listener(move |panel, _, window, cx| {
+                                        panel.open_post_thread(&opened, false, window, cx)
+                                    }))
+                            })
+                            .child(Label::new(post.name.clone()))
+                            .child(Label::new(format!(
+                                "{} · {}",
+                                post.role,
+                                post.provider.label()
+                            )))
+                            .child(Label::new(if post.archived {
+                                "Archivado".to_string()
+                            } else {
+                                match self.accounts.read(cx).post_status_label(&post) {
+                                    Some(status) => {
+                                        format!("{thread} · Cuenta: {account} · {status}")
+                                    }
+                                    None => format!("{thread} · Cuenta: {account}"),
+                                }
+                            })),
+                    )
                     .children((!post.archived).then(|| self.render_policy_state(&post, cx)))
                     .child(Label::new(if post.model.is_empty() {
                         "Modelo: por defecto".into()
