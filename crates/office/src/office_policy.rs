@@ -203,6 +203,12 @@ impl ThreadPolicy for OfficePolicy {
         decision
     }
 
+    // Thread choices of mode, model or favorites only affect their session; a post's model
+    // comes from its card in Phase 2, never from settings.json.
+    fn uses_saved_preferences(&self) -> bool {
+        false
+    }
+
     fn start_session(
         &self,
         agent_id: &AgentId,
@@ -396,6 +402,14 @@ mod tests {
         assert!(is_denied(&decision));
         cx.update(|cx| claude.start_session(&agent_id, Some(CLAUDE_ADAPTER.version), cx))
             .expect("the pinned version starts");
+    }
+
+    #[test]
+    fn office_agents_keep_preferences_out_of_settings() {
+        for provider in Provider::ALL {
+            let (policy, _events) = policy(provider);
+            assert!(!policy.uses_saved_preferences());
+        }
     }
 
     #[gpui::test]
