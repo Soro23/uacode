@@ -441,14 +441,14 @@ mod tests {
                 .collect::<Vec<_>>();
             ids.sort();
             let short_id: String = added.id.chars().take(8).collect();
-            assert_eq!(
-                ids,
-                vec![
-                    format!("office-claude-{short_id}"),
-                    "office-claude-default".to_string(),
-                    "office-codex-default".to_string(),
-                ]
-            );
+            // The account id is random, so it can sort before or after "default".
+            let mut expected = vec![
+                format!("office-claude-{short_id}"),
+                "office-claude-default".to_string(),
+                "office-codex-default".to_string(),
+            ];
+            expected.sort();
+            assert_eq!(ids, expected);
         });
         assert!(
             fs.metadata(root).await.expect("read metadata").is_none(),
